@@ -1,0 +1,1674 @@
+/**
+ * MatchSim - the authoritative water polo match simulation.
+ *
+ * Owns the match state machine (section 7.3), the clocks, possession, exclusions,
+ * substitutions, statistics (section 29), the deterministic event record
+ * (section 41) and the public action API that both the human input layer and the
+ * AI call into. It knows nothing about rendering.
+ *
+ * Fixed timestep. Every stochastic draw comes from a seeded RNG, and every state
+ * transition is emitted on the event bus and appended to the match record, so a
+ * match can be replayed exactly.
+ */
+
+import { EventBus } from './EventBus.js';
+import { Vec2, Rng, clamp, clamp01, lerp, dist2, angleDelta } from './Math2.js';
+import { Athlete, LOCOMOTION, freshStats } from '../gameplay/Athlete.js';
+import { Ball, BALL_STATE } from '../gameplay/Ball.js';
+import { ContactSystem, FOUL } from '../gameplay/Contact.js';
+import { GoalkeeperBrain, attemptSave, GK_PROFILE } from '../gameplay/Goalkeeper.js';
+import {
+  resolvePass, resolveCatch, resolveShot, goalAimPoint, pressureOn,
+  contextualShotType, SHOT_TYPES, PASS_TYPES, shotQuality, laneOpenness,
+} from '../gameplay/Actions.js';
+import {
+  MATCH_STATE, POSSESSION_EVENT, shotClockAfter, freeThrowSpot, endLineRestart,
+  exclusionTick, personalFoulResult, timeoutEligible, periodTransition,
+  shootoutState, substitutionLegal, explainFoul,
+} from '../rules/RulesEngine.js';
+import { TeamAI, DIFFICULTY } from '../ai/TeamAI.js';
+import { makeTeamTactics, OFFENSIVE_SYSTEMS, DEFENSIVE_SYSTEMS } from '../ai/Tactics.js';
+import { defaultLineup } from '../data/Teams.js';
+
+export const ASSIST_PROFILE = {
+  BEGINNER: 'beginner',
+  STANDARD: 'standard',
+  COMPETITIVE: 'competitive',
+  FULL_SIM: 'fullSim',
+};
+
+const ASSIST_VALUES = {
+  beginner:    { pass: 0.95, shot: 0.55, catchWindow: 1.5, switchAuto: true, indicators: 'full', gk: GK_PROFILE.ASSISTED },
+  standard:    { pass: 0.7, shot: 0.3, catchWindow: 1.2, switchAuto: true, indicators: 'standard', gk: GK_PROFILE.ASSISTED },
+  competitive: { pass: 0.35, shot: 0.12, catchWindow: 1.0, switchAuto: false, indicators: 'minimal', gk: GK_PROFILE.HYBRID },
+  fullSim:     { pass: 0.0, shot: 0.0, catchWindow: 0.85, switchAuto: false, indicators: 'minimal', gk: GK_PROFILE.MANUAL },
+};
+
+export class MatchSim {
+  /**
+   * @param {object} cfg
+   *   cfg.profile      rules profile
+   *   cfg.league       { teams, rosters }
+   *   cfg.homeId/awayId team ids
+   *   cfg.seed         deterministic seed
+   *   cfg.difficulty   key into DIFFICULTY
+   *   cfg.assist       key into ASSIST_VALUES
+   *   cfg.userSide     'home' | 'away' | null (null = AI vs AI showcase)
+   *   cfg.refereeProfile 'strict' | 'standard' | 'human'
+   */
+  constructor(cfg) {
+    this.profile = cfg.profile;
+    this.league = cfg.league;
+    this.seed = cfg.seed ?? 1;
+    this.rng = new Rng(this.seed);
+    this.bus = new EventBus();
+    this.record = [];             // deterministic match record (section 41)
+    this.difficultyKey = cfg.difficulty ?? 'national';
+    this.assistKey = cfg.assist ?? ASSIST_PROFILE.STANDARD;
+    this.assist = ASSIST_VALUES[this.assistKey];
+    this.refereeProfile = cfg.refereeProfile ?? 'standard';
+    // null when nobody is controlling (AI-vs-AI spectate): the AI then drives
+    // every athlete and auto-switch stays inert.
+    this.userControlsSide = cfg.userSide ?? null;
+    this.secondUserSide = cfg.secondUserSide ?? null;   // local one-versus-one
+
+    this.homeTeam = this.league.teams.find((t) => t.id === cfg.homeId);
+    this.awayTeam = this.league.teams.find((t) => t.id === cfg.awayId);
+
+    // Home attacks toward +z in the first period; ends swap at halftime.
+    this.attackDir = { home: 1, away: -1 };
+
+    this.ball = new Ball();
+    this.contact = new ContactSystem(this.rng.fork(0x51ed));
+
+    this.squads = { home: [], away: [] };
+    this.active = { home: [], away: [] };
+    this.bench = { home: [], away: [] };
+    this.gkBrain = { home: null, away: null };
+
+    this._buildSquads();
+
+    this.tactics = {
+      home: makeTeamTactics(this.homeTeam.style),
+      away: makeTeamTactics(this.awayTeam.style),
+    };
+    this.ai = {
+      home: new TeamAI('home', this.tactics.home, this.difficultyKey, this.rng.fork(0xA1)),
+      away: new TeamAI('away', this.tactics.away, this.difficultyKey, this.rng.fork(0xA2)),
+    };
+
+    // --- Match state -------------------------------------------------------
+    this.state = MATCH_STATE.PRE_MATCH;
+    this.stateTimer = 0;
+    this.period = 1;
+    this.gameClock = this.profile.timing.periodSeconds;
+    this.clockRunning = false;
+    this.clockNow = 0;             // monotonic simulation time
+    this.shotClock = this.profile.timing.normalPossession;
+    this.shotClockSecondary = false;
+    this.possession = null;
+    this.score = { home: 0, away: 0 };
+    this.timeoutsUsed = { home: 0, away: 0 };
+    this.challengesUsed = { home: 0, away: 0 };
+    this.exclusions = [];
+    this.pendingRestart = null;
+    this.transitionTimer = 0;      // >0 while a counterattack window is open
+    this.lastGoal = null;
+    this.roleDirty = true;
+    this.shootout = null;
+    this.abandoned = false;
+
+    this.stats = {
+      home: freshTeamStats(),
+      away: freshTeamStats(),
+    };
+    this.timeline = [];            // human-readable match events for the UI
+
+    // --- User control ------------------------------------------------------
+    this.userAthlete = null;
+    this.secondUserAthlete = null;
+    this.userCommand = emptyCommand();
+    this.secondUserCommand = emptyCommand();
+    this.userGkControl = false;
+    this.autoSwitch = true;          // EAFC-style automatic player switching
+    this.lockUserAthlete = false;    // Player Career: you control ONE athlete only
+    this.manualSwitchCooldown = 0;   // brief window where a manual pick is respected
+
+    this.pendingFouls = [];
+    this.explain = null;           // last call explanation for the HUD
+    this.reviewRequest = null;
+    this.paused = false;
+    this.presentation = {          // one-frame flags consumed by the renderer
+      whistle: 0, goalFlash: 0, saveFlash: 0, bigSplash: null, shake: 0,
+    };
+
+    this._log('matchCreated', {
+      profile: this.profile.id, home: this.homeTeam.id, away: this.awayTeam.id, seed: this.seed,
+    });
+  }
+
+  // =========================================================================
+  // Setup
+  // =========================================================================
+
+  _buildSquads() {
+    for (const side of ['home', 'away']) {
+      const team = side === 'home' ? this.homeTeam : this.awayTeam;
+      const roster = this.league.rosters[team.id];
+      const dir = this.attackDir[side];
+      const squad = roster.map((p) => new Athlete(p, side, dir));
+      this.squads[side] = squad;
+
+      const lineup = defaultLineup(roster);
+      const lineupIds = new Set(lineup.map((p) => p.id));
+      this.active[side] = squad.filter((a) => lineupIds.has(a.player.id));
+      this.bench[side] = squad.filter((a) => !lineupIds.has(a.player.id));
+      for (const a of this.bench[side]) a.inPool = false;
+
+      const gk = this.active[side].find((a) => a.isGoalkeeper);
+      if (gk) this.gkBrain[side] = new GoalkeeperBrain(gk, side, this.rng.fork(side === 'home' ? 7 : 11));
+    }
+  }
+
+  /** Place everyone for a period start / swim-off. */
+  setupPeriod() {
+    const f = this.profile.field;
+    for (const side of ['home', 'away']) {
+      const dir = this.attackDir[side];
+      const list = this.active[side];
+      list.forEach((a, i) => {
+        a.attackDir = dir;
+        a.resetForRestart();
+        a.inPool = true;
+        if (a.isGoalkeeper) {
+          a.pos.set(0, -dir * (f.length / 2 - 0.5));
+        } else {
+          // Line up on their own goal line for the swim-off.
+          const spread = ((i - 3) / 3) * (f.width / 2 - 2.2);
+          a.pos.set(spread, -dir * (f.length / 2 - 0.4));
+        }
+        a.heading = dir > 0 ? 0 : Math.PI;
+        a.shoulder = a.heading;
+        a.elevation = 0;
+        a.hasBall = false;
+      });
+      for (const a of this.bench[side]) a.inPool = false;
+    }
+    this.ball.reset(0, 0.08, 0);
+    this.ball.state = BALL_STATE.DEAD;
+    this.possession = null;
+    this.roleDirty = true;
+  }
+
+  start() {
+    this.setupPeriod();
+    this._setState(MATCH_STATE.PERIOD_SETUP, 2.4);
+    this._timeline(`Period ${this.period} - teams set.`);
+  }
+
+  // =========================================================================
+  // Accessors
+  // =========================================================================
+
+  activeAthletes(side) { return this.active[side].filter((a) => a.inPool); }
+  benchAthletes(side) { return this.bench[side]; }
+  allActive() { return [...this.activeAthletes('home'), ...this.activeAthletes('away')]; }
+  goalkeeperFor(side) { return this.active[side].find((a) => a.isGoalkeeper && a.inPool) ?? null; }
+  opponentSide(side) { return side === 'home' ? 'away' : 'home'; }
+  teamOf(side) { return side === 'home' ? this.homeTeam : this.awayTeam; }
+  timeRemainingInMatch() {
+    return this.gameClock + (this.profile.timing.periods - this.period) * this.profile.timing.periodSeconds;
+  }
+  isLive() { return this.state === MATCH_STATE.LIVE || this.state === MATCH_STATE.LOOSE_BALL; }
+  activeCount(side) { return this.activeAthletes(side).length; }
+  /** Extra-player / man-down status for the HUD and the AI. */
+  playerAdvantage(side) { return this.activeCount(side) - this.activeCount(this.opponentSide(side)); }
+
+  // =========================================================================
+  // Main update
+  // =========================================================================
+
+  update(dt) {
+    if (this.paused) return;
+    this.clockNow += dt;
+    for (const k in this.presentation) {
+      if (typeof this.presentation[k] === 'number') this.presentation[k] = Math.max(0, this.presentation[k] - dt * 3);
+    }
+    this.transitionTimer = Math.max(0, this.transitionTimer - dt);
+    this.stateTimer -= dt;
+
+    switch (this.state) {
+      case MATCH_STATE.PRE_MATCH: break;
+      case MATCH_STATE.PERIOD_SETUP: this._updatePeriodSetup(dt); break;
+      case MATCH_STATE.SWIM_OFF: this._updateLive(dt, true); break;
+      case MATCH_STATE.LIVE:
+      case MATCH_STATE.LOOSE_BALL: this._updateLive(dt, false); break;
+      case MATCH_STATE.ORDINARY_FOUL:
+      case MATCH_STATE.EXCLUSION_FOUL:
+      case MATCH_STATE.NEUTRAL_THROW: this._updateRestart(dt); break;
+      case MATCH_STATE.PENALTY_FOUL: this._updatePenalty(dt); break;
+      case MATCH_STATE.GOAL: this._updateGoal(dt); break;
+      case MATCH_STATE.TIMEOUT: this._updateTimeout(dt); break;
+      case MATCH_STATE.INTERVAL: this._updateInterval(dt); break;
+      case MATCH_STATE.PERIOD_END: this._updatePeriodEnd(dt); break;
+      case MATCH_STATE.SHOOTOUT: this._updateShootout(dt); break;
+      case MATCH_STATE.MATCH_END: break;
+      default: break;
+    }
+
+    // Bench recovery runs in every state.
+    for (const side of ['home', 'away']) {
+      for (const a of this.bench[side]) a.recoverOnBench(dt);
+    }
+  }
+
+  _updatePeriodSetup(dt) {
+    this._driveAthletes(dt, true);
+    if (this.stateTimer <= 0) {
+      if (this.profile.restarts.swimOffAtPeriodStart) {
+        this._setState(MATCH_STATE.SWIM_OFF, 8);
+        this.clockRunning = true;
+        this.presentation.whistle = 1;
+        // Release the ball on the half-distance line. It is genuinely loose:
+        // whoever reaches it first wins the sprint and the first possession.
+        this.ball.reset(0, this.ball.radius * 0.6, 0);
+        this.ball.state = BALL_STATE.FLIGHT;
+        this.ball.timeSinceLoose = 0;
+        this.ball.lastTouchSide = null;
+        this._timeline('Swim-off!');
+        this._log('swimOff', { period: this.period });
+      } else {
+        this._releaseBallToNearest();
+        this._beginLive();
+      }
+    }
+  }
+
+  /** Fallback used by profiles without a swim-off: nearest athlete starts. */
+  _releaseBallToNearest() {
+    const all = this.allActive().filter((a) => !a.isGoalkeeper);
+    if (!all.length) return;
+    const nearest = all.sort((a, b) => a.pos.lengthSq() - b.pos.lengthSq())[0];
+    this._giveBall(nearest);
+    this._applyShotClock(shotClockAfter(this.profile, POSSESSION_EVENT.GAIN));
+  }
+
+  _beginLive() {
+    this._setState(MATCH_STATE.LIVE, 0);
+    this.clockRunning = true;
+  }
+
+  _updateLive(dt, swimOff) {
+    // ---- Clocks -----------------------------------------------------------
+    if (this.clockRunning) {
+      this.gameClock = Math.max(0, this.gameClock - dt);
+      if (!swimOff && this.possession) {
+        this.shotClock = Math.max(0, this.shotClock - dt);
+        if (this.shotClock <= 0) {
+          this._turnover(this.opponentSide(this.possession), 'shotClockExpired');
+          return;
+        }
+      }
+    }
+
+    // ---- Exclusions -------------------------------------------------------
+    this._tickExclusions(dt, {});
+
+    // ---- Automatic control switching (before applying the user command) ---
+    this._autoSwitchControl(dt);
+
+    // ---- AI, input, locomotion -------------------------------------------
+    this.ai.home.update(dt, { sim: this });
+    this.ai.away.update(dt, { sim: this });
+    this.roleDirty = false;
+    this._driveGoalkeepers(dt);
+    this._applyUserCommand();
+    this._driveAthletes(dt, false);
+
+    // ---- Ball -------------------------------------------------------------
+    this.ball.update(dt, {
+      profile: this.profile,
+      onGoal: (ball, sign) => this._onGoalLineCrossed(ball, sign),
+      onEndLine: (ball, sign) => this._onEndLine(ball, sign),
+      onPost: () => { this.presentation.shake = 0.7; this.presentation.whistle = 0; },
+    });
+
+    // ---- Blocks and goalkeeper saves --------------------------------------
+    this._resolveBlocks(dt);
+    this._resolveSaves(dt);
+
+    // ---- Loose ball pickup / interception --------------------------------
+    if (this.ball.isLoose) this._resolveLooseBall(dt);
+
+    // ---- Contact and fouls ------------------------------------------------
+    const fouls = this.contact.update(dt, this.allActive(), this.ball, {
+      profile: this.profile,
+      refereeProfile: this.refereeProfile,
+      matchTime: this.clockNow,
+      allAthletes: this.allActive(),
+      goalkeeperFor: (s) => this.goalkeeperFor(s),
+    });
+    for (const foul of fouls) this._awardFoul(foul);
+
+    // ---- Statistics -------------------------------------------------------
+    for (const a of this.allActive()) a.stats.timeInPool += dt;
+    const posStats = this.possession ? this.stats[this.possession] : null;
+    if (posStats) posStats.possessionTime += dt;
+
+    // ---- Period end -------------------------------------------------------
+    if (this.gameClock <= 0 && this.state !== MATCH_STATE.PERIOD_END) {
+      this._setState(MATCH_STATE.PERIOD_END, 2.5);
+      this.clockRunning = false;
+      this.presentation.whistle = 1;
+      this._timeline(`End of period ${this.period}.`);
+      this._log('periodEnd', { period: this.period, score: { ...this.score } });
+    }
+
+    if (swimOff && (this.ball.holder || this.stateTimer <= 0)) {
+      if (this.ball.holder) {
+        this._setPossession(this.ball.holder.side, POSSESSION_EVENT.GAIN);
+      } else {
+        // Nobody won the sprint cleanly: award it to whoever is closest so the
+        // match never stalls on a dead ball.
+        this._releaseBallToNearest();
+      }
+      this._applyShotClock(shotClockAfter(this.profile, POSSESSION_EVENT.GAIN));
+      this._beginLive();
+    }
+  }
+
+  _updateRestart(dt) {
+    this._driveAthletes(dt, true);
+    this.ball.update(dt, { profile: this.profile });
+    this._tickExclusions(dt, {});
+    if (this.stateTimer <= 0 && this.pendingRestart) {
+      const r = this.pendingRestart;
+      const taker = r.taker;
+      if (taker && taker.inPool) {
+        taker.pos.set(r.spot.x, r.spot.z);
+        taker.vel.set(0, 0);
+        this._giveBall(taker);
+      }
+      this.pendingRestart = null;
+      this._beginLive();
+      this.clockRunning = true;
+    }
+  }
+
+  _updateGoal(dt) {
+    this._driveAthletes(dt, true);
+    this.ball.update(dt, { profile: this.profile });
+    if (this.stateTimer <= 0) {
+      // Restart from the centre by the team that conceded.
+      const restartSide = this.lastGoal ? this.opponentSide(this.lastGoal.side) : 'home';
+      this._positionForCentreRestart(restartSide);
+      const taker = this.activeAthletes(restartSide)
+        .filter((a) => !a.isGoalkeeper)
+        .sort((a, b) => Math.abs(a.pos.z) - Math.abs(b.pos.z))[0];
+      if (taker) this._giveBall(taker);
+      this._setPossession(restartSide, POSSESSION_EVENT.GOAL);
+      this._beginLive();
+      this.clockRunning = true;
+    }
+  }
+
+  _updatePenalty(dt) {
+    this._driveAthletes(dt, true);
+    this.ball.update(dt, {
+      profile: this.profile,
+      onGoal: (ball, sign) => this._onGoalLineCrossed(ball, sign),
+      onEndLine: (ball, sign) => this._onEndLine(ball, sign),
+    });
+    this._resolveSaves(dt);
+
+    const p = this.pendingRestart;
+    if (!p) { this._beginLive(); return; }
+
+    if (!p.taken && this.stateTimer <= 0) {
+      p.taken = true;
+      this.presentation.whistle = 1;
+      const shooter = p.taker;
+      if (shooter === this.userAthlete && this.userControlsSide) {
+        // The human takes it manually: hand them the ball and let them shoot.
+        shooter.pendingPenalty = true;
+        this._giveBall(shooter);
+        this.stateTimer = 6;
+      } else {
+        shooter.pendingPenalty = true;
+        this._giveBall(shooter);
+        const aim = { x: this.rng.range(-0.85, 0.85), y: this.rng.range(0.1, 0.8) };
+        this.tryShot(shooter, aim, SHOT_TYPES.PENALTY, 0.95);
+        shooter.pendingPenalty = false;
+        this.stateTimer = 4;
+      }
+    } else if (p.taken && (this.ball.isLoose || this.stateTimer <= 0)) {
+      if (this.stateTimer <= 0) {
+        p.taker.pendingPenalty = false;
+        this._beginLive();
+        this.clockRunning = true;
+      }
+    }
+  }
+
+  /**
+   * Penalty shootout (section 7.2 and 7.4). Five nominated shooters per team,
+   * alternating, then sudden death in pairs. Every attempt is a real penalty
+   * throw resolved by the normal shooting and goalkeeping systems.
+   */
+  _prepareShootout() {
+    const pick = (side) => this.activeAthletes(side)
+      .filter((a) => !a.isGoalkeeper)
+      .sort((a, b) =>
+        (b.player.attr.penaltyComposure + b.player.attr.shotPlacement + (b.has('penaltySpecialist') ? 40 : 0)) -
+        (a.player.attr.penaltyComposure + a.player.attr.shotPlacement + (a.has('penaltySpecialist') ? 40 : 0)))
+      .slice(0, Math.max(this.profile.shootout.shootersPerTeam, 5));
+
+    this.shootout = {
+      attempts: [],
+      order: { home: pick('home'), away: pick('away') },
+      index: { home: 0, away: 0 },
+      phase: 'setup',
+      timer: 1.2,
+      current: null,
+      resolved: false,
+    };
+    this.clockRunning = false;
+    this._timeline('Penalty shootout.');
+    this._log('shootoutStart', {});
+  }
+
+  _updateShootout(dt) {
+    const so = this.shootout;
+    if (!so) { this._endMatch(); return; }
+
+    this._driveAthletes(dt, true);
+    this._driveGoalkeepers(dt);
+    this.ball.update(dt, {
+      profile: this.profile,
+      onGoal: (ball, sign) => this._onShootoutGoal(sign),
+      onEndLine: () => { if (so.phase === 'flight') this._resolveShootoutAttempt(false); },
+    });
+    if (so.phase === 'flight') this._resolveSaves(dt);
+
+    so.timer -= dt;
+    if (so.timer > 0) return;
+
+    switch (so.phase) {
+      case 'setup': {
+        const state = shootoutState(this.profile, so.attempts);
+        if (state.finished) { this._finishShootout(state); return; }
+        // Safety valve: shootouts must terminate. After a long sudden death,
+        // the next pair that is not both-score-or-both-miss decides it, and a
+        // hard cap prevents any pathological infinite tie.
+        if (so.attempts.length >= 40) {
+          const decided = state.hScore !== state.aScore
+            ? { ...state, finished: true, winner: state.hScore > state.aScore ? 'home' : 'away' }
+            : { ...state, finished: true, winner: this.rng.chance(0.5) ? 'home' : 'away' };
+          this._finishShootout(decided);
+          return;
+        }
+        const side = state.nextSide;
+        const list = so.order[side];
+        const shooter = list[so.index[side] % list.length];
+        so.index[side]++;
+        so.current = { side, shooter };
+        so.resolved = false;
+
+        this._positionShootout(side, shooter);
+        so.phase = 'ready';
+        so.timer = 1.1;
+        this._timeline(`${this.teamOf(side).short} · #${shooter.player.capNumber} ${shooter.player.name} steps up.`);
+        break;
+      }
+      case 'ready': {
+        const { side, shooter } = so.current;
+        shooter.pendingPenalty = true;
+        this._giveBall(shooter);
+        this.presentation.whistle = 1;
+        const gk = this.goalkeeperFor(this.opponentSide(side));
+
+        // The goalkeeper guesses a side and commits. A correct guess against a
+        // less composed shooter is what produces shootout saves - roughly a
+        // quarter to a third, so ties break on their own before the cap.
+        if (gk && this.gkBrain[gk.side]) {
+          const shooterComp = clamp01((shooter.player.attr.penaltyComposure - 10) / 85);
+          const gkSkill = clamp01((gk.player.attr.reactionSpeed + gk.player.attr.setPositioning - 20) / 170);
+          so.gkGuessRight = this.rng.chance(clamp01(0.5 + gkSkill * 0.25 - shooterComp * 0.2));
+          so.gkSaveRoll = this.rng.chance(clamp01((so.gkGuessRight ? 0.55 : 0.08) * (0.7 + gkSkill * 0.6)));
+        } else {
+          so.gkSaveRoll = false;
+        }
+
+        const aim = {
+          x: clamp(this.rng.gauss(0, 0.5), -0.85, 0.85),
+          y: clamp(this.rng.range(0.08, 0.8), 0, 1),
+        };
+        this.tryShot(shooter, aim, SHOT_TYPES.PENALTY, 0.95);
+        shooter.pendingPenalty = false;
+        so.phase = 'flight';
+        so.timer = 2.6;
+        break;
+      }
+      case 'flight':
+        // No goal within the window: the attempt failed.
+        this._resolveShootoutAttempt(false);
+        break;
+      case 'between':
+        so.phase = 'setup';
+        so.timer = 0.6;
+        break;
+      default:
+        break;
+    }
+  }
+
+  _positionShootout(side, shooter) {
+    const f = this.profile.field;
+    const dir = this.attackDir[side];
+    const gz = dir * (f.length / 2);
+
+    for (const s of ['home', 'away']) {
+      for (const a of this.activeAthletes(s)) {
+        a.resetForRestart();
+        a.hasBall = false;
+        if (a.isGoalkeeper) {
+          const ownGoal = -a.attackDir * (f.length / 2);
+          a.pos.set(0, ownGoal + a.attackDir * 0.3);
+          a.heading = a.attackDir > 0 ? 0 : Math.PI;
+          a.shoulder = a.heading;
+        } else if (a === shooter) {
+          a.pos.set(0, gz - dir * f.penaltyLine);
+          a.heading = dir > 0 ? 0 : Math.PI;
+          a.shoulder = a.heading;
+        } else {
+          // Everyone else waits on the half-distance line.
+          const i = this.activeAthletes(s).indexOf(a);
+          a.pos.set((i - 3) * 1.5, s === 'home' ? -1.4 : 1.4);
+        }
+      }
+    }
+    this.ball.holder = null;
+    this.ball.reset(0, 0.35, gz - dir * f.penaltyLine);
+  }
+
+  _onShootoutGoal(sign) {
+    const so = this.shootout;
+    if (!so || so.phase !== 'flight' || so.resolved) return;
+    // A committed keeper who guessed right turns the goal into a save.
+    if (so.gkSaveRoll) {
+      const gk = this.goalkeeperFor(this.opponentSide(so.current.side));
+      if (gk) { gk.stats.saves++; this.stats[gk.side].saves++; this.presentation.saveFlash = 1; }
+      this._resolveShootoutAttempt(false);
+      return;
+    }
+    const defendingSide = this.attackDir.home === sign ? 'away' : 'home';
+    this._resolveShootoutAttempt(this.opponentSide(defendingSide) === so.current.side);
+  }
+
+  _resolveShootoutAttempt(scored) {
+    const so = this.shootout;
+    if (!so || so.resolved) return;
+    so.resolved = true;
+    const { side, shooter } = so.current;
+    so.attempts.push({ side, scored, shooter: shooter.id });
+    if (scored) {
+      this.score[side]++;
+      shooter.stats.goals++;
+      this.presentation.goalFlash = 1;
+    }
+    this._timeline(`${scored ? 'Scored' : 'Saved'} — ${this.teamOf(side).short} shootout ` +
+      `${so.attempts.filter((a) => a.side === 'home' && a.scored).length}` +
+      `-${so.attempts.filter((a) => a.side === 'away' && a.scored).length}.`);
+    this._log('shootoutAttempt', { side, scored, shooter: shooter.id });
+
+    const state = shootoutState(this.profile, so.attempts);
+    if (state.finished) { this._finishShootout(state); return; }
+    so.phase = 'between';
+    so.timer = 1.4;
+  }
+
+  _finishShootout(state) {
+    this.shootoutResult = { winner: state.winner, home: state.hScore, away: state.aScore };
+    this._timeline(state.winner
+      ? `${this.teamOf(state.winner).name} win the shootout ${Math.max(state.hScore, state.aScore)}-${Math.min(state.hScore, state.aScore)}.`
+      : 'Shootout undecided.');
+    this._log('shootoutEnd', this.shootoutResult);
+    this._endMatch();
+  }
+
+  _updateTimeout(dt) {
+    for (const a of this.allActive()) a.recoverOnBench(dt * 0.6);
+    if (this.stateTimer <= 0) {
+      this._beginLive();
+      this.clockRunning = true;
+    }
+  }
+
+  _updatePeriodEnd(dt) {
+    if (this.stateTimer > 0) return;
+    const t = periodTransition(this.profile, this.period, this.score);
+    if (!t.matchOver) {
+      this._setState(MATCH_STATE.INTERVAL, Math.min(t.intervalSeconds, 6)); // presentation-length interval
+      this.intervalRealSeconds = t.intervalSeconds;
+      this._timeline(t.intervalSeconds > 200 ? 'Half time.' : 'Interval.');
+    } else if (t.needsShootout) {
+      this.shootout = { attempts: [], order: { home: [], away: [] }, index: 0 };
+      this._prepareShootout();
+      this._setState(MATCH_STATE.SHOOTOUT, 2);
+      this._timeline('Scores level - penalty shootout.');
+    } else {
+      this._endMatch();
+    }
+  }
+
+  _updateInterval(dt) {
+    // Athletes recover at the real interval rate even though the presentation is short.
+    const scale = (this.intervalRealSeconds ?? 120) / Math.max(0.5, 6);
+    for (const a of [...this.active.home, ...this.active.away]) a.recoverOnBench(dt * scale * 0.5);
+    if (this.stateTimer <= 0) {
+      this.period++;
+      this.gameClock = this.profile.timing.periodSeconds;
+      // Teams change ends at half time.
+      if (this.period === this.profile.timing.periods / 2 + 1) {
+        this.attackDir.home *= -1;
+        this.attackDir.away *= -1;
+        for (const side of ['home', 'away']) {
+          for (const a of this.squads[side]) a.attackDir = this.attackDir[side];
+        }
+        this._timeline('Teams change ends.');
+      }
+      this.setupPeriod();
+      this._setState(MATCH_STATE.PERIOD_SETUP, 2.2);
+      this._log('periodStart', { period: this.period });
+    }
+  }
+
+  _endMatch() {
+    this._setState(MATCH_STATE.MATCH_END, 0);
+    this.clockRunning = false;
+    const winner = this.score.home === this.score.away ? null : (this.score.home > this.score.away ? 'home' : 'away');
+    this._timeline(winner ? `Full time - ${this.teamOf(winner).name} win ${Math.max(this.score.home, this.score.away)}-${Math.min(this.score.home, this.score.away)}.` : `Full time - ${this.score.home}-${this.score.away} draw.`);
+    this._log('matchEnd', { score: { ...this.score }, winner });
+    this.bus.emit('matchEnd', { score: { ...this.score }, winner });
+  }
+
+  // =========================================================================
+  // Locomotion drivers
+  // =========================================================================
+
+  _driveAthletes(dt, restingPhase) {
+    const world = { profile: this.profile, pool: this.profile.field };
+    for (const side of ['home', 'away']) {
+      for (const a of this.active[side]) {
+        if (!a.inPool) {
+          // Excluded athletes wait in the re-entry corner.
+          a.update(dt, emptyCommand(), world);
+          continue;
+        }
+        let cmd = a.cmd ?? emptyCommand();
+        if (restingPhase && a !== this.userAthlete) {
+          cmd = { ...cmd, effort: cmd.effort * 0.25, rise: Math.max(cmd.rise * 0.5, 0.25) };
+        }
+        a.update(dt, cmd, world);
+        a.cmd = null;
+      }
+    }
+    // Charging shots / passes advance here so that the release window is honest.
+    for (const a of this.allActive()) {
+      if (a.charging) a.chargeTime += dt;
+      if (a.justCaught) a.justCaught = Math.max(0, a.justCaught - dt);
+    }
+  }
+
+  _driveGoalkeepers(dt) {
+    for (const side of ['home', 'away']) {
+      const brain = this.gkBrain[side];
+      if (!brain) continue;
+      const gk = brain.gk;
+      if (!gk.inPool) continue;
+      brain.decayFake(dt);
+      const userDriving = this.userGkControl && side === this.userControlsSide && this.userAthlete === gk;
+      if (!userDriving) {
+        gk.cmd = brain.update(dt, { sim: this, difficulty: DIFFICULTY[this.difficultyKey] });
+      }
+    }
+  }
+
+  _applyUserCommand() {
+    if (this.userAthlete && this.userAthlete.inPool) this.userAthlete.cmd = this.userCommand;
+    if (this.secondUserAthlete && this.secondUserAthlete.inPool) this.secondUserAthlete.cmd = this.secondUserCommand;
+  }
+
+  // =========================================================================
+  // Ball interactions
+  // =========================================================================
+
+  _giveBall(athlete) {
+    for (const a of this.allActive()) a.hasBall = false;
+    athlete.hasBall = true;
+    this.ball.holder = athlete;
+    this.ball.lastHolder = athlete;
+    this.ball.lastTouchSide = athlete.side;
+    this.ball.state = athlete.isGoalkeeper ? BALL_STATE.HELD : BALL_STATE.DRIBBLE;
+    athlete.justCaught = 0.55;
+    athlete.pumpFakes = 0;
+    if (this.possession !== athlete.side) this._setPossession(athlete.side, POSSESSION_EVENT.GAIN);
+  }
+
+  _resolveLooseBall(dt) {
+    const b = this.ball;
+    if (b.timeSinceLoose < 0.09) return;
+    const candidates = this.allActive().filter((a) => a.catchCooldown <= 0);
+    let best = null, bestScore = -1e9;
+    for (const a of candidates) {
+      const hand = a.handPoint();
+      const d = b.distanceTo(hand.x, hand.y, hand.z);
+      // Swimming ability widens the effective reach for a loose ball - a faster,
+      // more explosive swimmer wins the dispute (the user's "disputa de bola").
+      const swim = clamp01((a.player.attr.swimSpeed * 0.6 + a.player.attr.firstStroke * 0.4 - 10) / 85);
+      const window = (a.isGoalkeeper ? 0.55 : 0.42) * (a === this.userAthlete ? this.assist.catchWindow : 1) +
+        a.reach * 0.42 + a.elevation * 0.35 + swim * 0.35 * lerp(0.6, 1, a.freshness);
+      if (d < window) {
+        // Score by how comfortably they reach it, so the swimmer with margin wins.
+        const score = (window - d) + swim * 0.25;
+        if (score > bestScore) { bestScore = score; best = a; }
+      }
+    }
+    if (!best) return;
+
+    const opp = this.activeAthletes(this.opponentSide(best.side));
+    const result = resolveCatch(best, b, this.rng, { pressure: pressureOn(best, opp) });
+    const intended = b.intendedReceiver;
+
+    if (result.controlled) {
+      const wasPass = b.kind === 'pass';
+      const previous = b.lastHolder;
+      const intercepted = previous && previous.side !== best.side;
+      this._giveBall(best);
+      best.catchCooldown = 0.12;
+      // A delayed control costs the receiver a beat before they can act.
+      if (result.outcome === 'delayedControl') best.actionLock = 0.32;
+
+      if (wasPass && previous && previous.side === best.side) {
+        previous.stats.passesCompleted++;
+        this.stats[previous.side].passesCompleted++;
+        if (previous !== best) this._pendingAssist = { from: previous, at: this.clockNow };
+        if (best.roleSlot?.role === 'CF') { best.stats.centreTouches++; this.stats[best.side].centreTouches++; }
+      } else if (intercepted) {
+        best.stats.steals++;
+        this.stats[best.side].steals++;
+        if (previous) { previous.stats.turnovers++; this.stats[previous.side].turnovers++; }
+        this._timeline(`Interception - #${best.player.capNumber} ${best.player.name}.`);
+        this._openTransition(best.side);
+        const ev = shotClockAfter(this.profile, POSSESSION_EVENT.GAIN);
+        this._applyShotClock(ev);
+      } else if (b.kind === 'shot' || b.kind === 'deflection') {
+        // Rebound control.
+        best.stats.reboundsControlled++;
+        this.stats[best.side].reboundsControlled++;
+        const ev = intercepted || best.side !== b.lastTouchSide
+          ? shotClockAfter(this.profile, POSSESSION_EVENT.GAIN)
+          : shotClockAfter(this.profile, POSSESSION_EVENT.SHOT_SAVED_TO_ATTACK, { remaining: this.shotClock });
+        this._applyShotClock(ev);
+      }
+      this.bus.emit('catch', { athlete: best, outcome: result.outcome });
+    } else if (result.outcome === 'bobble' || result.outcome === 'deflection') {
+      // Knock it away rather than take it cleanly.
+      const away = this.rng.range(0, Math.PI * 2);
+      const s = result.outcome === 'deflection' ? 3.4 : 1.6;
+      b.launch(
+        { x: b.pos.x, y: Math.max(0.15, b.pos.y), z: b.pos.z },
+        { x: Math.sin(away) * s, y: 1.2, z: Math.cos(away) * s },
+        { x: 0, y: 0, z: 0 }, 'deflection', best
+      );
+      best.catchCooldown = 0.35;
+      b.eventFlags.splash = 0.5;
+    } else if (result.outcome === 'drop') {
+      best.catchCooldown = 0.42;
+      if (b.kind === 'pass' && b.lastHolder && b.lastHolder.side === best.side) {
+        best.stats.turnovers++;
+        this.stats[best.side].turnovers++;
+      }
+    }
+  }
+
+  _resolveSaves(dt) {
+    if (!this.ball.isLoose) return;
+    for (const side of ['home', 'away']) {
+      const brain = this.gkBrain[side];
+      const gk = this.goalkeeperFor(side);
+      if (!gk || !brain) continue;
+      // Only the keeper whose goal is threatened.
+      const gz = brain.goalZ(this.profile);
+      if (Math.sign(this.ball.vel.z) !== Math.sign(gz - this.ball.pos.z)) continue;
+      if (Math.abs(this.ball.pos.z - gz) > 2.6) continue;
+
+      const manual = (this.userGkControl && this.userAthlete === gk) ? this.userCommand.saveAim : null;
+      const res = attemptSave(gk, this.ball, brain, this.rng, { manualDirection: manual });
+      if (!res) continue;
+
+      gk.stats.saves++;
+      this.stats[side].saves++;
+      this.presentation.saveFlash = 1;
+      this.bus.emit('save', { gk, outcome: res.outcome });
+      this._timeline(`Save - #${gk.player.capNumber} ${gk.player.name} (${res.outcome}).`);
+
+      if (res.outcome === 'controlled') {
+        this._giveBall(gk);
+        const ev = shotClockAfter(this.profile, POSSESSION_EVENT.GAIN);
+        this._applyShotClock(ev);
+        this._openTransition(side);
+        gk.stats.reboundsControlled++;
+      } else {
+        this.ball.launch(
+          { x: this.ball.pos.x, y: Math.max(0.2, this.ball.pos.y), z: this.ball.pos.z },
+          res.vel, { x: 0, y: 0, z: 0 }, 'deflection', gk
+        );
+        this.ball.eventFlags.splash = 0.7;
+      }
+      return;
+    }
+  }
+
+  _onGoalLineCrossed(ball, sign) {
+    if (this.state === MATCH_STATE.GOAL) return;
+
+    // Only a shot (or a shot the goalkeeper/defender deflected) may score. A
+    // pass that happens to cross the line is the ball going out of play, not a
+    // goal - otherwise the AI "scores" by lobbing passes into an empty net.
+    if (ball.kind !== 'shot' && ball.kind !== 'deflection') {
+      this._onEndLine(ball, sign);
+      return;
+    }
+
+    const defendingSide = this.attackDir.home === sign ? 'away' : 'home';
+    const scoringSide = this.opponentSide(defendingSide);
+    // A ball put into their own goal still counts for the opponents.
+    this._awardGoal(scoringSide, ball);
+  }
+
+  _onEndLine(ball, sign) {
+    if (!this.isLive()) return;
+    if (ball.timeSinceLoose < 0.05) return;
+    const defendingSide = this.attackDir.home === sign ? 'away' : 'home';
+    const decision = endLineRestart(this.profile, ball.lastTouchSide, defendingSide, ball.pos.x);
+    const f = this.profile.field;
+    if (decision.kind === 'corner') {
+      const attackingSide = decision.side;
+      const spotZ = this.attackDir[attackingSide] * (f.length / 2 - f.restrictedLine);
+      this._beginRestart(attackingSide, { x: decision.spot.x, z: spotZ }, POSSESSION_EVENT.CORNER, 'Corner throw');
+    } else {
+      const gk = this.goalkeeperFor(defendingSide);
+      const spotZ = -this.attackDir[defendingSide] * (f.length / 2 - 0.6);
+      this._beginRestart(defendingSide, { x: clamp(ball.pos.x, -3, 3), z: spotZ }, POSSESSION_EVENT.GOAL_THROW, 'Goal throw', gk);
+    }
+  }
+
+  _awardGoal(side, ball) {
+    this.score[side]++;
+    const scorer = ball.lastHolder && ball.lastHolder.side === side ? ball.lastHolder : null;
+    this.lastGoal = { side, scorer, at: this.clockNow, period: this.period, clock: this.gameClock };
+
+    if (scorer) {
+      scorer.stats.goals++;
+      scorer.stats.shotsOnGoal++;
+      this.stats[side].goals++;
+      if (this.transitionTimer > 0) { scorer.stats.counterGoals++; this.stats[side].counterGoals++; }
+      if (this._pendingAssist && this.clockNow - this._pendingAssist.at < 4 && this._pendingAssist.from.side === side) {
+        this._pendingAssist.from.stats.assists++;
+        this.stats[side].assists++;
+      }
+      if (this._extraPlayerAttack === side) this.stats[side].extraPlayerGoals++;
+    }
+    this._pendingAssist = null;
+
+    this.presentation.goalFlash = 1;
+    this.presentation.whistle = 1;
+    this.presentation.shake = 1;
+    this._timeline(`GOAL - ${this.teamOf(side).short} ${this.score.home}-${this.score.away}${scorer ? ` (#${scorer.player.capNumber} ${scorer.player.name})` : ''}.`);
+    this._log('goal', { side, scorer: scorer?.id ?? null, score: { ...this.score }, period: this.period, clock: this.gameClock });
+    this.bus.emit('goal', { side, scorer, score: { ...this.score } });
+
+    // Excluded players of the conceding team may re-enter immediately.
+    this._tickExclusions(0, { goalScored: true, scoringSide: side });
+
+    this.clockRunning = false;
+    this._setState(MATCH_STATE.GOAL, this.profile.timing.restartDelay.goal);
+    for (const a of this.allActive()) { a.hasBall = false; a.resetForRestart(); }
+    this.ball.holder = null;
+  }
+
+  _positionForCentreRestart(restartSide) {
+    const f = this.profile.field;
+    for (const side of ['home', 'away']) {
+      const dir = this.attackDir[side];
+      const list = this.activeAthletes(side);
+      list.forEach((a, i) => {
+        if (a.isGoalkeeper) { a.pos.set(0, -dir * (f.length / 2 - 0.6)); return; }
+        const own = side === restartSide;
+        const z = own ? -dir * 1.2 : -dir * 4.0;
+        a.pos.set(((i - 3) / 3) * (f.width / 2 - 2.4), z);
+        a.vel.set(0, 0);
+        a.heading = dir > 0 ? 0 : Math.PI;
+        a.shoulder = a.heading;
+      });
+    }
+    this.roleDirty = true;
+  }
+
+  // =========================================================================
+  // Fouls, exclusions, penalties
+  // =========================================================================
+
+  _awardFoul(foul) {
+    if (!this.isLive()) return;
+    const offender = foul.offender;
+    const victim = foul.victim;
+    const attackingSide = victim.side;
+
+    // A player who has already fouled out cannot commit another foul - they are
+    // out of the water. Guards against a stray contact event being charged to
+    // someone past the personal-foul limit.
+    if (!offender.inPool || offender.excludedForMatch ||
+        offender.personalFouls >= this.profile.discipline.personalFoulLimit) {
+      return;
+    }
+
+    this.presentation.whistle = 1;
+    this.explain = explainFoul(this.profile, foul);
+    this.bus.emit('foul', { foul, explanation: this.explain });
+    this._log('foul', {
+      type: foul.type, offender: offender.id, victim: victim.id,
+      at: foul.at, reason: foul.reason, clock: this.gameClock, period: this.period,
+    });
+
+    if (foul.type === FOUL.ORDINARY) {
+      offender.stats.ordinaryFouls++;
+      this.stats[offender.side].ordinaryFouls++;
+      const { spot, directShot } = freeThrowSpot(this.profile, foul.at, this.attackDir[attackingSide]);
+      const sameTeam = this.possession === attackingSide;
+      this._applyShotClock(shotClockAfter(this.profile, POSSESSION_EVENT.ORDINARY_FOUL, { sameTeam }));
+      this._beginRestart(attackingSide, spot, null, `Free throw${directShot ? ' (direct shot permitted)' : ''}`, victim);
+      return;
+    }
+
+    if (foul.type === FOUL.EXCLUSION || foul.type === FOUL.BRUTALITY) {
+      const pf = personalFoulResult(this.profile, offender.personalFouls);
+      offender.personalFouls = pf.count;
+      offender.stats.personalFouls = pf.count;
+      offender.stats.exclusionsConceded++;
+      victim.stats.exclusionsDrawn++;
+      this.stats[offender.side].exclusionsConceded++;
+      this.stats[attackingSide].exclusionsDrawn++;
+
+      const seconds = foul.type === FOUL.BRUTALITY
+        ? this.profile.discipline.brutalityExclusionSeconds
+        : this.profile.timing.exclusionSeconds;
+
+      this._excludeAthlete(offender, seconds, pf.excludedForMatch);
+      this._applyShotClock(shotClockAfter(this.profile, POSSESSION_EVENT.EXCLUSION_AWARDED));
+      this._extraPlayerAttack = attackingSide;
+      this.stats[attackingSide].extraPlayerAttacks++;
+
+      const { spot } = freeThrowSpot(this.profile, foul.at, this.attackDir[attackingSide]);
+      this._beginRestart(attackingSide, spot, null,
+        pf.excludedForMatch ? 'Exclusion - third personal foul, substitute permitted' : 'Exclusion', victim,
+        MATCH_STATE.EXCLUSION_FOUL);
+      this._timeline(`Exclusion - #${offender.player.capNumber} ${offender.player.name} (${pf.count} personal).`);
+      return;
+    }
+
+    if (foul.type === FOUL.PENALTY) {
+      const pf = personalFoulResult(this.profile, offender.personalFouls);
+      offender.personalFouls = pf.count;
+      offender.stats.penaltiesConceded++;
+      victim.stats.penaltiesDrawn++;
+      this.stats[offender.side].penaltiesConceded++;
+      this.stats[attackingSide].penaltiesDrawn++;
+      this._excludeAthlete(offender, this.profile.timing.exclusionSeconds, pf.excludedForMatch);
+      this._setupPenalty(attackingSide, victim);
+      this._timeline(`Penalty throw to ${this.teamOf(attackingSide).short}.`);
+    }
+  }
+
+  _excludeAthlete(athlete, seconds, forMatch) {
+    athlete.inPool = false;
+    athlete.excluded = true;
+    athlete.hasBall = false;
+    athlete.excludedForMatch = !!forMatch;
+    athlete.exclusionRemaining = seconds;
+    const f = this.profile.field;
+    const dir = athlete.attackDir;
+    athlete.pos.set(Math.sign(athlete.pos.x || 1) * (f.width / 2 - 0.3), -dir * (f.length / 2 - 0.8));
+    athlete.vel.set(0, 0);
+
+    this.exclusions.push({
+      athlete, side: athlete.side, remaining: seconds, forMatch: !!forMatch,
+      startedAt: this.clockNow,
+    });
+    this.roleDirty = true;
+
+    if (forMatch) {
+      // A substitute may enter immediately for a third personal foul.
+      const sub = this.bench[athlete.side]
+        .filter((b) => !b.excludedForMatch && !b.isGoalkeeper)
+        .sort((a, b) => b.freshness * 40 + b.player.overall - (a.freshness * 40 + a.player.overall))[0];
+      if (sub) this._pendingSubAfterExclusion = { side: athlete.side, out: athlete, in: sub, at: this.clockNow + seconds };
+    }
+  }
+
+  _tickExclusions(dt, events) {
+    if (!this.exclusions.length) return;
+    const remaining = [];
+    for (const ex of this.exclusions) {
+      const res = exclusionTick(this.profile, ex, dt, {
+        goalScored: events.goalScored && events.scoringSide !== ex.side,
+        possessionRegained: events.possessionRegained,
+      });
+      ex.remaining = res.exclusion.remaining;
+      ex.athlete.exclusionRemaining = Math.max(0, ex.remaining);
+      if (res.done) {
+        this._reenter(ex, res.reason);
+      } else {
+        remaining.push(ex);
+      }
+    }
+    if (remaining.length !== this.exclusions.length) this.roleDirty = true;
+    this.exclusions = remaining;
+  }
+
+  _reenter(ex, reason) {
+    const a = ex.athlete;
+    a.excluded = false;
+    a.exclusionRemaining = 0;
+    if (ex.forMatch) {
+      // Stays out; the substitute takes the place.
+      const pending = this._pendingSubAfterExclusion;
+      if (pending && pending.out === a) {
+        this._doSubstitution(pending.side, pending.out, pending.in, true);
+        this._pendingSubAfterExclusion = null;
+      }
+      return;
+    }
+    const f = this.profile.field;
+    a.inPool = true;
+    a.pos.set(Math.sign(a.pos.x || 1) * (f.width / 2 - 0.5), -a.attackDir * (f.length / 2 - f.restrictedLine));
+    a.vel.set(0, 0);
+    a.elevation = 0;
+    this._log('reentry', { athlete: a.id, reason });
+    this.bus.emit('reentry', { athlete: a, reason });
+    if (this._extraPlayerAttack && this.activeCount('home') === this.activeCount('away')) this._extraPlayerAttack = null;
+  }
+
+  _setupPenalty(attackingSide, victim) {
+    const f = this.profile.field;
+    const dir = this.attackDir[attackingSide];
+    const gz = dir * (f.length / 2);
+    // The best available penalty taker, or the fouled athlete if the user prefers.
+    const takers = this.activeAthletes(attackingSide).filter((a) => !a.isGoalkeeper);
+    const taker = takers.sort((a, b) =>
+      (b.player.attr.penaltyComposure + b.player.attr.shotPlacement) -
+      (a.player.attr.penaltyComposure + a.player.attr.shotPlacement))[0] ?? victim;
+
+    taker.pos.set(0, gz - dir * f.penaltyLine);
+    taker.vel.set(0, 0);
+    taker.heading = dir > 0 ? 0 : Math.PI;
+    taker.shoulder = taker.heading;
+
+    // Everyone else clears to outside the 5m line, on the sides.
+    let k = 0;
+    for (const side of ['home', 'away']) {
+      for (const a of this.activeAthletes(side)) {
+        if (a === taker) continue;
+        if (a.isGoalkeeper) {
+          const ownGoal = -a.attackDir * (f.length / 2);
+          a.pos.set(0, ownGoal + a.attackDir * 0.25);
+          continue;
+        }
+        const sgn = k % 2 === 0 ? 1 : -1;
+        a.pos.set(sgn * (f.width / 2 - 0.8), gz - dir * (f.penaltyLine + 1.6 + Math.floor(k / 2) * 0.9));
+        a.vel.set(0, 0);
+        k++;
+      }
+    }
+    this.ball.reset(taker.pos.x, 0.4, taker.pos.z);
+    this.pendingRestart = { taker, taken: false, kind: 'penalty' };
+    this.clockRunning = false;
+    this._setPossession(attackingSide, POSSESSION_EVENT.PENALTY);
+    this._setState(MATCH_STATE.PENALTY_FOUL, this.profile.timing.restartDelay.penalty);
+  }
+
+  _beginRestart(side, spot, possessionEvent, label, preferredTaker = null, state = MATCH_STATE.ORDINARY_FOUL) {
+    const takers = this.activeAthletes(side);
+    let taker = preferredTaker && preferredTaker.inPool && preferredTaker.side === side ? preferredTaker : null;
+    if (!taker) {
+      taker = takers.filter((a) => !a.isGoalkeeper)
+        .sort((a, b) => Math.hypot(a.pos.x - spot.x, a.pos.z - spot.z) - Math.hypot(b.pos.x - spot.x, b.pos.z - spot.z))[0]
+        ?? takers[0];
+    }
+    if (possessionEvent) this._applyShotClock(shotClockAfter(this.profile, possessionEvent));
+    this._setPossession(side, possessionEvent ?? POSSESSION_EVENT.ORDINARY_FOUL);
+
+    this.ball.reset(spot.x, 0.25, spot.z);
+    this.pendingRestart = { taker, spot, label };
+    this.clockRunning = false;
+    for (const a of this.allActive()) { a.hasBall = false; a.charging = null; }
+    this.ball.holder = null;
+    this._setState(state, this.profile.timing.restartDelay[state === MATCH_STATE.EXCLUSION_FOUL ? 'exclusion' : 'ordinary']);
+    if (label) this._timeline(label);
+  }
+
+  _turnover(toSide, reason) {
+    this._timeline(reason === 'shotClockExpired' ? 'Shot clock expired - turnover.' : 'Turnover.');
+    this._log('turnover', { to: toSide, reason });
+    const prev = this.opponentSide(toSide);
+    this.stats[prev].turnovers++;
+    if (this.ball.holder) this.ball.holder.stats.turnovers++;
+
+    const f = this.profile.field;
+    const gk = this.goalkeeperFor(toSide);
+    const spotZ = -this.attackDir[toSide] * (f.length / 2 - 1.2);
+    this._beginRestart(toSide, { x: clamp(this.ball.pos.x, -4, 4), z: spotZ }, POSSESSION_EVENT.GAIN, null, gk);
+    this._openTransition(toSide);
+  }
+
+  _setPossession(side, event) {
+    if (this.possession === side) return;
+    const previous = this.possession;
+    this.possession = side;
+    this.roleDirty = true;
+    if (previous) this._tickExclusions(0, { possessionRegained: side });
+    this.bus.emit('possession', { side, previous, event });
+    this._log('possession', { side, event });
+    if (this._extraPlayerAttack && this._extraPlayerAttack !== side) this._extraPlayerAttack = null;
+  }
+
+  _applyShotClock(res) {
+    if (!res) return;
+    this.shotClock = res.value;
+    this.shotClockSecondary = res.secondary;
+  }
+
+  _openTransition(side) {
+    this.transitionTimer = 3.2;
+    this.stats[side].counterOpportunities++;
+  }
+
+  // =========================================================================
+  // Public action API (called by input and by the AI)
+  // =========================================================================
+
+  tryPass(passer, target, type = PASS_TYPES.DRY, power = 0.6) {
+    if (!passer.hasBall || passer.actionLock > 0) return false;
+    const opponents = this.activeAthletes(this.opponentSide(passer.side));
+    const aim = target.pos ? { x: target.pos.x, z: target.pos.z } : target;
+    const assist = passer === this.userAthlete ? this.assist.pass : 0.55;
+
+    const res = resolvePass(passer, aim, {
+      type, power, opponents, rng: this.rng, receiver: target.pos ? target : null, assist,
+    });
+
+    passer.hasBall = false;
+    passer.actionLock = lerp(0.34, 0.16, clamp01((passer.player.attr.quickRelease - 10) / 85));
+    passer.stats.passesAttempted++;
+    this.stats[passer.side].passesAttempted++;
+    this.ball.intendedReceiver = res.receiver;
+    this.ball.launch(res.from, res.vel, res.spin, 'pass', passer);
+    this.ball.eventFlags.splash = 0.25;
+    this.bus.emit('pass', { passer, res });
+    this._log('pass', { by: passer.id, to: res.receiver?.id ?? null, type, quality: +res.quality.toFixed(3) });
+    return true;
+  }
+
+  tryShot(shooter, aim, type = null, charge = 0.7) {
+    if (!shooter.hasBall || shooter.actionLock > 0) return false;
+    const attackDir = shooter.attackDir;
+    const aimPoint = goalAimPoint(this.profile, attackDir, aim);
+    const opponents = this.activeAthletes(this.opponentSide(shooter.side));
+    const gk = this.goalkeeperFor(this.opponentSide(shooter.side));
+    const distToGoal = Math.hypot(shooter.pos.x - aimPoint.x, shooter.pos.z - aimPoint.z);
+    const shotType = type ?? contextualShotType(
+      shooter, distToGoal, pressureOn(shooter, opponents), shooter.pumpFakes > 0,
+      shooter.justCaught > 0, gk && Math.abs(gk.pos.z - aimPoint.z) > 1.0
+    );
+
+    // Release timing.
+    //
+    // A human holds the shoot button and releases inside a window; how close
+    // they get to their athlete's ideal preparation time is their timing score.
+    //
+    // The AI does not press buttons, so scoring it on a charge time it never
+    // accumulated would punish it for nothing. Instead its release quality comes
+    // from the athlete's own release speed and composure, scaled by difficulty -
+    // which is exactly where section 19.2 says difficulty is allowed to act.
+    const ideal = lerp(0.55, 0.3, clamp01((shooter.player.attr.releaseSpeed - 10) / 85));
+    let timing;
+    if (shooter.charging === 'shot' || shooter.chargeTime > 0.01) {
+      timing = clamp01(1 - Math.abs(shooter.chargeTime - ideal) / 0.55);
+    } else {
+      const skill = clamp01((shooter.player.attr.releaseSpeed * 0.5 + shooter.player.attr.composure * 0.5 - 10) / 85);
+      const diff = DIFFICULTY[this.difficultyKey] ?? DIFFICULTY.national;
+      timing = clamp01(lerp(0.45, 0.95, skill) * lerp(0.82, 1.05, diff.recognition) +
+        this.rng.gauss(0, diff.error * 0.5));
+    }
+
+    const res = resolveShot(shooter, aimPoint, {
+      type: shotType, charge, timing, opponents, rng: this.rng,
+      goalkeeper: gk, profile: this.profile, shotClock: this.shotClock,
+    });
+
+    shooter.hasBall = false;
+    shooter.charging = null;
+    shooter.chargeTime = 0;
+    shooter.actionLock = shotType === SHOT_TYPES.QUICK ? 0.18 : 0.38;
+    shooter.stats.shots++;
+    shooter.stats.shotLocations.push({ x: +shooter.pos.x.toFixed(2), z: +shooter.pos.z.toFixed(2), type: shotType, q: +res.quality.toFixed(3) });
+    this.stats[shooter.side].shots++;
+    if (this._extraPlayerAttack === shooter.side) this.stats[shooter.side].extraPlayerShots++;
+
+    this.ball.intendedReceiver = null;
+    this.ball.launch(res.from, res.vel, res.spin, 'shot', shooter);
+    this.lastShot = res;
+    this.bus.emit('shot', { shooter, res });
+    this._log('shot', { by: shooter.id, shotType, quality: +res.quality.toFixed(3), timing: +timing.toFixed(2) });
+
+    // The keeper's read of a shooter who fakes constantly.
+    const brain = this.gkBrain[this.opponentSide(shooter.side)];
+    if (brain && shooter.pumpFakes > 0) brain.noteFake();
+    shooter.pumpFakes = 0;
+    return true;
+  }
+
+  tryPumpFake(athlete) {
+    if (!athlete.hasBall || athlete.actionLock > 0) return false;
+    if (this.clockNow - athlete.lastPumpFakeAt < 0.45) return false;
+    athlete.pumpFakes++;
+    athlete.lastPumpFakeAt = this.clockNow;
+    athlete.actionLock = 0.22;
+    // Repeated fakes cost stability and burst (section 14.5).
+    athlete.burst = clamp01(athlete.burst - 0.035 * athlete.pumpFakes);
+    const brain = this.gkBrain[this.opponentSide(athlete.side)];
+    if (brain) brain.noteFake();
+    this.bus.emit('pumpFake', { athlete });
+    return true;
+  }
+
+  trySteal(defender) {
+    if (defender.stealCooldown > 0 || defender.actionLock > 0) return false;
+    defender.stealCooldown = 0.75;
+    defender.actionLock = 0.2;
+    const carrier = this.ball.holder;
+    if (!carrier || carrier.side === defender.side) return false;
+
+    const d = dist2(defender.pos, carrier.pos);
+    const ballD = this.ball.distanceTo(defender.pos.x, 0.25, defender.pos.z);
+    if (ballD > defender.reach + 0.5) return false;
+
+    const timing = clamp01((defender.player.attr.stealTiming - 10) / 85);
+    const security = clamp01((carrier.player.attr.ballSecurity - 10) / 85);
+    const p = clamp01(0.55 * timing - 0.4 * security + 0.25 * (1 - clamp01(ballD / 1.2)) +
+      (carrier.speed > 1.2 ? 0.1 : 0) - carrier.freshness * 0.1 + defender.freshness * 0.1);
+
+    if (this.rng.chance(p)) {
+      carrier.hasBall = false;
+      carrier.stats.turnovers++;
+      this.stats[carrier.side].turnovers++;
+      defender.stats.steals++;
+      this.stats[defender.side].steals++;
+      this._giveBall(defender);
+      this._applyShotClock(shotClockAfter(this.profile, POSSESSION_EVENT.GAIN));
+      this._openTransition(defender.side);
+      this._timeline(`Steal - #${defender.player.capNumber} ${defender.player.name}.`);
+      this.bus.emit('steal', { defender, from: carrier });
+      return true;
+    }
+    // A failed steal leaves the defender out of position - and often is a foul,
+    // which the contact system will pick up on its own.
+    defender.stunned = 0.25;
+    return false;
+  }
+
+  tryBlock(defender) {
+    if (defender.actionLock > 0) return false;
+    defender.blockTimer = 0.55;
+    // A block is a real volume: if the ball passes through the raised arm it
+    // deflects. Resolved in _resolveBlocks each frame while blockTimer runs.
+    return true;
+  }
+
+  _resolveBlocks(dt) {
+    if (!this.ball.isLoose || this.ball.kind !== 'shot') return;
+    for (const a of this.allActive()) {
+      if (a.blockTimer <= 0 || a.side === this.ball.lastTouchSide) continue;
+      const hand = a.handPoint();
+      const reach = a.reach * (0.75 + 0.55 * a.armRaised) + a.elevation * 0.4;
+      if (this.ball.distanceTo(hand.x, hand.y + 0.25, hand.z) < reach) {
+        const timing = clamp01((a.player.attr.blockTiming - 10) / 85);
+        if (this.rng.chance(0.35 + timing * 0.5)) {
+          a.stats.blocks++;
+          this.stats[a.side].blocks++;
+          const s = this.ball.speed * 0.45;
+          const ang = this.rng.range(0, Math.PI * 2);
+          this.ball.launch(
+            { x: this.ball.pos.x, y: Math.max(0.25, this.ball.pos.y), z: this.ball.pos.z },
+            { x: Math.sin(ang) * s * 0.7, y: s * 0.4 + 1.2, z: Math.cos(ang) * s * 0.7 },
+            { x: 0, y: 0, z: 0 }, 'deflection', a
+          );
+          this.presentation.saveFlash = 0.6;
+          this._timeline(`Block - #${a.player.capNumber} ${a.player.name}.`);
+          this.bus.emit('block', { athlete: a });
+          return;
+        }
+      }
+    }
+  }
+
+  requestSubstitution(side, out, incoming, by = 'user') {
+    const legal = substitutionLegal(this.profile, {
+      state: this.state,
+      enteringAt: out.pos,
+      side,
+      attackDir: this.attackDir[side],
+      isGoalkeeper: incoming.isGoalkeeper,
+      activeCount: this.activeCount(side),
+    });
+    if (!legal.legal) {
+      this.bus.emit('substitutionRejected', { side, reason: legal.reason });
+      return { ok: false, reason: legal.reason };
+    }
+    this._doSubstitution(side, out, incoming, false);
+    this.bus.emit('substitution', { side, out, in: incoming, reason: legal.reason, by });
+    return { ok: true, reason: legal.reason };
+  }
+
+  _doSubstitution(side, out, incoming, forced) {
+    const io = this.active[side].indexOf(out);
+    const ib = this.bench[side].indexOf(incoming);
+    if (io < 0 || ib < 0) return;
+    this.active[side][io] = incoming;
+    this.bench[side][ib] = out;
+
+    incoming.attackDir = this.attackDir[side];
+    incoming.inPool = true;
+    const f = this.profile.field;
+    incoming.pos.set(
+      Math.sign(out.pos.x || 1) * (f.width / 2 - 0.5),
+      -this.attackDir[side] * (f.length / 2 - f.restrictedLine)
+    );
+    incoming.vel.set(0, 0);
+    incoming.heading = out.heading;
+    incoming.shoulder = out.heading;
+
+    if (out.hasBall) { out.hasBall = false; this.ball.holder = null; }
+    out.inPool = false;
+    if (out.isGoalkeeper && incoming.isGoalkeeper) {
+      this.gkBrain[side] = new GoalkeeperBrain(incoming, side, this.rng.fork(side === 'home' ? 17 : 19));
+    }
+    if (this.userAthlete === out) this.userAthlete = incoming;
+    this.roleDirty = true;
+    this.stats[side].substitutions++;
+    this._log('substitution', { side, out: out.id, in: incoming.id, forced });
+    this._timeline(`Substitution ${this.teamOf(side).short}: #${incoming.player.capNumber} ${incoming.player.name} on for #${out.player.capNumber} ${out.player.name}.`);
+  }
+
+  /** Pull the goalkeeper for a seventh field player (section 16.4). */
+  pullGoalkeeper(side) {
+    const gk = this.goalkeeperFor(side);
+    if (!gk) return { ok: false, reason: 'noGoalkeeper' };
+    if (this.profile.squad.goalkeeperRequiredAtStart && this.state === MATCH_STATE.PERIOD_SETUP) {
+      return { ok: false, reason: 'goalkeeperRequiredAtStart' };
+    }
+    const field = this.bench[side].find((b) => !b.isGoalkeeper && !b.excludedForMatch);
+    if (!field) return { ok: false, reason: 'noFieldPlayerAvailable' };
+    this._doSubstitution(side, gk, field, false);
+    this.gkBrain[side] = null;
+    this._timeline(`${this.teamOf(side).name} pull the goalkeeper.`);
+    this._log('goalkeeperPulled', { side });
+    return { ok: true };
+  }
+
+  callTimeout(side, by = 'user') {
+    const check = timeoutEligible(this.profile, {
+      possession: this.possession, side, state: this.state, timeoutsUsed: this.timeoutsUsed[side],
+    });
+    if (!check.allowed) return check;
+    this.timeoutsUsed[side]++;
+    this.clockRunning = false;
+    this._setState(MATCH_STATE.TIMEOUT, 4);
+    this._timeline(`Timeout - ${this.teamOf(side).name}.`);
+    this._log('timeout', { side, by });
+    this.bus.emit('timeout', { side });
+    return { allowed: true };
+  }
+
+  requestChallenge(side) {
+    if (!this.profile.review.coachChallenges) return { ok: false, reason: 'notSupported' };
+    if (this.challengesUsed[side] >= this.profile.review.coachChallenges) return { ok: false, reason: 'noChallengesRemaining' };
+    if (!this.lastGoal || this.clockNow - this.lastGoal.at > this.profile.review.challengeWindowSeconds) {
+      return { ok: false, reason: 'windowClosed' };
+    }
+    this.challengesUsed[side]++;
+    this._timeline(`${this.teamOf(side).name} challenge the decision. Video review...`);
+    // The simulation is deterministic and the referee model already used full
+    // information, so a challenge confirms unless the call was made with poor
+    // visibility - which is exactly the case a review exists to correct.
+    const overturn = (this.lastGoal.visibility ?? 1) < 0.5;
+    this._log('coachChallenge', { side, overturn });
+    return { ok: true, overturn };
+  }
+
+  // =========================================================================
+  // User control helpers
+  // =========================================================================
+
+  /** Nearest teammate to the ball, used for automatic player switching. */
+  autoSelectAthlete(side) {
+    const list = this.activeAthletes(side).filter((a) => !a.isGoalkeeper);
+    if (!list.length) return null;
+    if (this.ball.holder && this.ball.holder.side === side) return this.ball.holder;
+    return list.sort((a, b) =>
+      this.ball.distanceTo(a.pos.x, 0.2, a.pos.z) - this.ball.distanceTo(b.pos.x, 0.2, b.pos.z))[0];
+  }
+
+  switchAthlete(side, direction = 1) {
+    if (this.lockUserAthlete) return;  // you are locked to your own player
+    const list = this.activeAthletes(side).filter((a) => !a.isGoalkeeper);
+    if (!list.length) return;
+    const i = list.indexOf(this.userAthlete);
+    const next = list[(i + direction + list.length) % list.length];
+    this.setUserAthlete(next);
+    this.manualSwitchCooldown = 1.2;  // let the manual pick stick for a moment
+  }
+
+  /**
+   * Automatic control switching (EAFC style). On attack, control follows the ball
+   * - you always drive the carrier, and the instant you pass, control jumps to the
+   * player you passed to so you can meet your own pass. On defence, control snaps
+   * to the teammate nearest the ball, with a little hysteresis so it does not
+   * flicker between two equally close players. A manual switch is respected for a
+   * short window, and goalkeeper control is never auto-overridden.
+   */
+  _autoSwitchControl(dt) {
+    if (this.lockUserAthlete) return;  // Player Career locks control to your athlete
+    if (!this.autoSwitch || !this.userControlsSide || this.userGkControl) return;
+    this.manualSwitchCooldown = Math.max(0, this.manualSwitchCooldown - dt);
+    const side = this.userControlsSide;
+    const attacking = this.possession === side;
+    const ball = this.ball;
+
+    if (attacking) {
+      // Follow the carrier; while a pass is in the air, jump to the receiver.
+      if (ball.holder && ball.holder.side === side && !ball.holder.isGoalkeeper) {
+        if (this.userAthlete !== ball.holder) this.setUserAthlete(ball.holder);
+      } else if (ball.isLoose && ball.kind === 'pass' && ball.intendedReceiver &&
+                 ball.intendedReceiver.side === side && !ball.intendedReceiver.isGoalkeeper &&
+                 ball.intendedReceiver.inPool) {
+        if (this.userAthlete !== ball.intendedReceiver) this.setUserAthlete(ball.intendedReceiver);
+      }
+      return;
+    }
+
+    // Defending (or a loose ball we do not own): control the nearest defender.
+    if (this.manualSwitchCooldown > 0) return;
+    const list = this.activeAthletes(side).filter((a) => !a.isGoalkeeper);
+    if (!list.length) return;
+    const dTo = (a) => ball.distanceTo(a.pos.x, 0.25, a.pos.z);
+    let nearest = list[0];
+    for (const a of list) if (dTo(a) < dTo(nearest)) nearest = a;
+    const cur = this.userAthlete && list.includes(this.userAthlete) ? this.userAthlete : null;
+    // Only switch if the nearest is clearly closer than whoever we control now.
+    if (!cur || (nearest !== cur && dTo(nearest) < dTo(cur) - 0.6)) {
+      this.setUserAthlete(nearest);
+    }
+  }
+
+  setUserAthlete(a) {
+    if (!a) return;
+    this.userAthlete = a;
+    this.userGkControl = a.isGoalkeeper;
+    this.bus.emit('userAthleteChanged', { athlete: a });
+  }
+
+  toggleGoalkeeperControl() {
+    const side = this.userControlsSide;
+    if (this.userGkControl) {
+      this.setUserAthlete(this.autoSelectAthlete(side));
+    } else {
+      const gk = this.goalkeeperFor(side);
+      if (gk) this.setUserAthlete(gk);
+    }
+  }
+
+  // =========================================================================
+  // Bookkeeping
+  // =========================================================================
+
+  _setState(state, timer) {
+    const prev = this.state;
+    this.state = state;
+    this.stateTimer = timer;
+    this.bus.emit('stateChange', { from: prev, to: state });
+    this._log('state', { from: prev, to: state, clock: +this.gameClock.toFixed(2), period: this.period });
+  }
+
+  _log(type, data) {
+    // Spread data first so an event's own fields (e.g. a shot's shot-type) can
+    // never overwrite the record's event `type`.
+    this.record.push({ ...data, t: +this.clockNow.toFixed(3), type, seedCalls: this.rng.calls });
+    if (this.record.length > 20000) this.record.splice(0, 5000);
+  }
+
+  _timeline(text) {
+    this.timeline.push({
+      text, period: this.period, clock: this.gameClock, at: this.clockNow,
+      score: { ...this.score },
+    });
+    if (this.timeline.length > 200) this.timeline.shift();
+    this.bus.emit('timeline', { text });
+  }
+
+  /** Post-match / live statistics package for the UI (section 29). */
+  statsPackage() {
+    const build = (side) => {
+      const s = this.stats[side];
+      const players = this.squads[side]
+        .filter((a) => a.stats.timeInPool > 0.5 || a.stats.shots > 0)
+        .map((a) => ({
+          name: a.player.name, cap: a.player.capNumber, position: a.player.position,
+          ...a.stats,
+          distanceSwum: +a.distanceSwum.toFixed(1),
+          sprintEfforts: a.sprintEfforts,
+          fatigue: +(1 - a.freshness).toFixed(2),
+          shootingPct: a.stats.shots ? Math.round((a.stats.goals / a.stats.shots) * 100) : 0,
+        }))
+        .sort((x, y) => y.goals - x.goals || y.shots - x.shots);
+      return {
+        team: this.teamOf(side),
+        ...s,
+        shootingPct: s.shots ? Math.round((s.goals / s.shots) * 100) : 0,
+        savePct: (s.shotsFaced = this.stats[this.opponentSide(side)].shots) > 0
+          ? Math.round((s.saves / Math.max(1, this.stats[this.opponentSide(side)].shots)) * 100) : 0,
+        extraPlayerConversion: s.extraPlayerAttacks ? Math.round((s.extraPlayerGoals / s.extraPlayerAttacks) * 100) : 0,
+        passCompletion: s.passesAttempted ? Math.round((s.passesCompleted / s.passesAttempted) * 100) : 0,
+        possessionTime: Math.round(s.possessionTime),
+        players,
+      };
+    };
+    return { home: build('home'), away: build('away'), score: { ...this.score }, timeline: this.timeline.slice(-40) };
+  }
+
+  /** Serialise for save/load (section 40.1: save system). */
+  serialise() {
+    return {
+      version: 2,
+      seed: this.seed,
+      profileId: this.profile.id,
+      home: this.homeTeam.id,
+      away: this.awayTeam.id,
+      period: this.period,
+      gameClock: this.gameClock,
+      shotClock: this.shotClock,
+      score: { ...this.score },
+      state: this.state,
+      possession: this.possession,
+      timeoutsUsed: { ...this.timeoutsUsed },
+      stats: structuredClone(this.stats),
+      timeline: this.timeline.slice(-60),
+      athletes: [...this.squads.home, ...this.squads.away].map((a) => ({
+        id: a.id, x: a.pos.x, z: a.pos.z, heading: a.heading,
+        burst: a.burst, pool: a.pool, matchFatigue: a.matchFatigue,
+        personalFouls: a.personalFouls, inPool: a.inPool,
+        excludedForMatch: a.excludedForMatch, stats: a.stats,
+      })),
+      exclusions: this.exclusions.map((e) => ({ id: e.athlete.id, remaining: e.remaining, forMatch: e.forMatch })),
+      recordLength: this.record.length,
+    };
+  }
+
+  restore(data) {
+    if (data.version !== 2) throw new Error('Unsupported save version');
+    this.period = data.period;
+    this.gameClock = data.gameClock;
+    this.shotClock = data.shotClock;
+    this.score = { ...data.score };
+    this.possession = data.possession;
+    this.timeoutsUsed = { ...data.timeoutsUsed };
+    this.stats = structuredClone(data.stats);
+    this.timeline = data.timeline ?? [];
+    const byId = new Map([...this.squads.home, ...this.squads.away].map((a) => [a.id, a]));
+    for (const s of data.athletes) {
+      const a = byId.get(s.id);
+      if (!a) continue;
+      a.pos.set(s.x, s.z);
+      a.heading = s.heading; a.shoulder = s.heading;
+      a.burst = s.burst; a.pool = s.pool; a.matchFatigue = s.matchFatigue;
+      a.personalFouls = s.personalFouls; a.inPool = s.inPool;
+      a.excludedForMatch = s.excludedForMatch;
+      a.stats = s.stats;
+    }
+    this.active.home = this.squads.home.filter((a) => a.inPool).slice(0, this.profile.squad.activePlayers);
+    this.active.away = this.squads.away.filter((a) => a.inPool).slice(0, this.profile.squad.activePlayers);
+    this.bench.home = this.squads.home.filter((a) => !this.active.home.includes(a));
+    this.bench.away = this.squads.away.filter((a) => !this.active.away.includes(a));
+    this.exclusions = (data.exclusions ?? []).map((e) => ({
+      athlete: byId.get(e.id), side: byId.get(e.id)?.side, remaining: e.remaining, forMatch: e.forMatch,
+    })).filter((e) => e.athlete);
+    this._setState(data.state, 0);
+    this.roleDirty = true;
+  }
+}
+
+function freshTeamStats() {
+  return {
+    goals: 0, assists: 0, shots: 0, shotsOnGoal: 0, saves: 0, blocks: 0, steals: 0,
+    turnovers: 0, ordinaryFouls: 0, exclusionsDrawn: 0, exclusionsConceded: 0,
+    penaltiesDrawn: 0, penaltiesConceded: 0, extraPlayerAttacks: 0, extraPlayerGoals: 0,
+    extraPlayerShots: 0, manDownStops: 0, centreEntries: 0, centreTouches: 0,
+    counterGoals: 0, counterOpportunities: 0, possessionTime: 0, passesAttempted: 0,
+    passesCompleted: 0, reboundsControlled: 0, substitutions: 0,
+  };
+}
+
+export function emptyCommand() {
+  return { dir: null, effort: 0, rise: 0, face: null, brace: false, saveAim: null };
+}
