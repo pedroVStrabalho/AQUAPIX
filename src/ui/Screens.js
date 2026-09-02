@@ -116,7 +116,7 @@ const SCREENS = {
       'Player Career', "You ARE a player: train, earn, live your life, then play the matches.",
       'Playable', () => mgr.show('playerCreate')));
     list.appendChild(menuItem(
-      'Manager Career', 'Take a club through a season: squad, tactics, training, fixtures, table.',
+      'Coach Career', 'Run a club: sign players, an academy, the market, tactics, money and big decisions.',
       'Playable', () => mgr.show('careerSetup')));
     list.appendChild(menuItem(
       'Training Arena', 'Isolated drills: shooting, passing under pressure, extra-player attack.',

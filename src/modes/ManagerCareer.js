@@ -14,7 +14,8 @@
 
 import { Rng, clamp, clamp01, lerp } from '../core/Math2.js';
 import { TEAMS, defaultLineup } from '../data/Teams.js';
-import { overallFor, POSITION_NAMES, TRAIT_BY_ID } from '../data/Attributes.js';
+import { overallFor, POSITION_NAMES, TRAIT_BY_ID, OVERALL_WEIGHTS, POSITIONS } from '../data/Attributes.js';
+import { starRating, starString } from '../data/DisplayStats.js';
 import { registerScreen, shell, menuItem, chipRow, field, el } from '../ui/Screens.js';
 import { simulateByStars } from './SimResult.js';
 import { OFFENSIVE_SYSTEMS, DEFENSIVE_SYSTEMS, EXTRA_PLAYER_SYSTEMS, MAN_DOWN_SYSTEMS, TACTICAL_TRIGGERS } from '../ai/Tactics.js';
@@ -70,6 +71,12 @@ export class ManagerCareer {
     }
 
     this._buildFreeAgents();
+    this.squadMorale = 72;             // 0-100 club morale
+    this.academyIntake = [];          // youth prospects to sign at season start
+    this.market = this._buildMarket(); // transfer market
+    this.pendingDecisions = [];        // coach decisions awaiting a choice
+    this.transferBudgetUsed = 0;
+    this._genAcademy();
 
     const club = TEAMS.find((t) => t.id === clubId);
     this.board = {
@@ -145,6 +152,7 @@ export class ManagerCareer {
       this.applyResult(fx, result);
     }
     this.applyTrainingWeek();
+    this._maybeGenerateDecision();
     this.round++;
     if (this.round >= this.fixtures.length) this.endSeason();
   }
@@ -277,8 +285,7 @@ export class ManagerCareer {
     this.board.budget += 3200;
     for (const p of this.squad) {
       p.age++;
-      const s = this.state[p.id];
-      s.condition = 1; s.matchFatigue = 0; s.apps = 0; s.goals = 0;
+      const s = this.state[p.id] ?? (this.state[p.id] = { condition: 1, matchFatigue: 0, injuryWeeks: 0, form: 1, apps: 0, goals: 0, assists: 0, exclusions: 0, saves: 0 });
       // Decline after thirty, gentle and attribute-driven.
       if (p.age > 30) {
         for (const k of ['swimSpeed', 'firstStroke', 'explosiveness', 'burstStamina', 'legPower']) {
@@ -287,7 +294,164 @@ export class ManagerCareer {
         p.overall = overallFor(p);
       }
     }
-    this.pushNews(`Season ${this.season} begins. Budget: ${this.board.budget}.`);
+    // Development happens over the summer, then reset season counters.
+    this.developSquad();
+    for (const p of this.squad) { const s = this.state[p.id]; if (s) { s.condition = 1; s.matchFatigue = 0; s.apps = 0; s.goals = 0; } }
+    // New academy intake and a refreshed transfer market.
+    this._genAcademy();
+    this.market = this._buildMarket();
+    this.pushNews(`Season ${this.season} begins. Budget: ${this.board.budget}. ${this.academyIntake.length} academy prospects await your decision.`);
+  }
+
+
+  // ======================================================================
+  // Coach Career depth: development, academy, market, decisions, morale
+  // ======================================================================
+
+  /** Multi-season development driven by the 1-10 potential score. */
+  developSquad() {
+    for (const p of this.squad) {
+      const s = this.state[p.id] ?? {};
+      const apps = s.apps ?? 0;
+      const youth = clamp01((27 - p.age) / 12);
+      const playing = clamp01(apps / 12);
+      const pot = (p.pot10 ?? 5) / 10;
+      const cap = p.potential ?? 90;
+      const room = Math.max(0, cap - p.overall);
+      if (room <= 0) continue;
+      // Facilities/board confidence give a small development multiplier.
+      const facility = 0.9 + this.board.confidence * 0.3;
+      let growth = Math.round((1.5 + pot * 11) * (0.35 + youth * 0.85) * (0.45 + playing * 0.9) *
+        clamp01(room / 6) * facility * this.rng.range(0.75, 1.15));
+      growth = clamp(growth, 0, room);
+      if (growth <= 0) continue;
+      const before = p.overall;
+      const weights = OVERALL_WEIGHTS[p.position] ?? OVERALL_WEIGHTS.UT;
+      for (const attr of Object.keys(weights)) {
+        p.attr[attr] = Math.min(99, (p.attr[attr] ?? 50) + growth);
+      }
+      p.overall = overallFor(p);
+      // Never overshoot the cap.
+      if (p.overall > cap) p.overall = cap;
+      if (p.overall > before && p.id !== undefined) {
+        const gained = p.overall - before;
+        if (gained >= 3) this.pushNews(`${p.name} developed sharply: ${before} -> ${p.overall} overall (${starWord(before)} to ${starWord(p.overall)}).`);
+      }
+    }
+  }
+
+  _makeProspect(idx, opts = {}) {
+    const rng = this.rng.fork(0xAC + idx * 131 + this.season * 977);
+    const position = opts.position ?? rng.pick(POSITIONS);
+    const attr = {};
+    for (const a of Object.keys(this.squad[0]?.attr ?? {})) attr[a] = Math.round(clamp(rng.gauss(48, 7), 28, 66));
+    // Boost position keys a little.
+    const weights = OVERALL_WEIGHTS[position] ?? OVERALL_WEIGHTS.UT;
+    for (const k of Object.keys(weights)) attr[k] = Math.round(clamp(attr[k] + rng.range(2, 10), 28, 72));
+    const age = opts.academy ? rng.int(16, 18) : rng.int(19, 29);
+    const p = {
+      id: (opts.academy ? 'ac' : 'mk') + '_' + this.season + '_' + idx,
+      teamId: null, firstName: rng.pick(FIRST_NAMES), lastName: rng.pick(LAST_NAMES),
+      position, secondaryPosition: null, leftHanded: rng.chance(0.15),
+      height: rng.int(180, 202), age, attr, traits: [], form: 1, morale: 0.7, condition: 1,
+    };
+    p.name = `${p.firstName} ${p.lastName}`;
+    p.overall = overallFor(p);
+    // Potential: academy prospects skew high (gems); market skews to their level.
+    p.pot10 = opts.academy ? Math.round(clamp(rng.gauss(6.5, 2), 3, 10))
+                           : Math.round(clamp(rng.gauss(5, 2), 1, 9));
+    p.potential = Math.round(clamp(52 + p.pot10 * 4.3 + (30 - age) * 0.4, p.overall, 99));
+    p.wage = Math.round((p.overall ** 2.1) / 60) * 10;
+    p.askingPrice = opts.academy ? Math.round(150 + p.pot10 * 60)
+                                 : Math.round((p.overall ** 2.5) / 40) * 10;
+    this.state[p.id] = { condition: 1, matchFatigue: 0, injuryWeeks: 0, form: 1, apps: 0, goals: 0, assists: 0, exclusions: 0, saves: 0 };
+    return p;
+  }
+
+  _genAcademy() {
+    this.academyIntake = [];
+    const n = 3 + this.rng.int(0, 2);
+    for (let i = 0; i < n; i++) this.academyIntake.push(this._makeProspect(i, { academy: true }));
+  }
+
+  _buildMarket() {
+    const pool = [];
+    for (let i = 0; i < 12; i++) pool.push(this._makeProspect(i, { academy: false }));
+    return pool.sort((a, b) => b.overall - a.overall);
+  }
+
+  signProspect(id, from) {
+    const src = from === 'academy' ? this.academyIntake : from === 'market' ? this.market : this.freeAgents;
+    const i = src.findIndex((p) => p.id === id);
+    if (i < 0) return { ok: false, reason: 'unavailable' };
+    const p = src[i];
+    const fee = from === 'free' ? 0 : (p.askingPrice ?? 0);
+    if (fee > this.board.budget) return { ok: false, reason: 'insufficientBudget' };
+    if (this.squad.length >= 18) return { ok: false, reason: 'squadFull' };
+    this.board.budget -= fee;
+    this.transferBudgetUsed += fee;
+    src.splice(i, 1);
+    p.teamId = this.clubId;
+    p.capNumber = nextCapNumber(this.squad);
+    this.squad.push(p);
+    this.pushNews(`Signed ${p.name} (${POSITION_NAMES[p.position]}, ${p.overall} OVR, potential ${p.pot10}/10)${fee ? ` for ${fee}` : ' on a free'}.`);
+    return { ok: true };
+  }
+
+  // ---- Coach decisions --------------------------------------------------
+  _maybeGenerateDecision() {
+    if (this.pendingDecisions.length > 0) return;
+    if (this.rng.next() > 0.4) return;
+    const squad = this.squad.filter((p) => p.id !== 'ME');
+    const star = squad.sort((a, b) => b.overall - a.overall)[0];
+    const benched = squad.filter((p) => (this.state[p.id]?.apps ?? 0) < this.round * 0.3);
+    const templates = [
+      {
+        text: `${star?.name} wants assurances he is your key player.`,
+        options: [
+          { label: 'Promise him a central role', effect: { morale: +6, confidence: -0.02 } },
+          { label: 'Tell him to earn it', effect: { morale: -4, confidence: +0.03 } },
+        ],
+      },
+      {
+        text: 'The board offers extra transfer funds if you cut the wage bill.',
+        options: [
+          { label: 'Take the funds (+2500 budget)', effect: { budget: +2500, morale: -5 } },
+          { label: 'Decline, keep the squad happy', effect: { morale: +3 } },
+        ],
+      },
+      {
+        text: benched.length ? `${benched[0].name} is frustrated with a lack of minutes.` : 'A youngster asks for more game time.',
+        options: [
+          { label: 'Promise more minutes', effect: { morale: +5 } },
+          { label: 'Loan-list him', effect: { morale: -3, budget: +400 } },
+        ],
+      },
+      {
+        text: 'A sponsor wants a pre-season friendly tour.',
+        options: [
+          { label: 'Accept (+1800 budget, tiring)', effect: { budget: +1800, morale: -3 } },
+          { label: 'Decline, focus on training', effect: { morale: +2, confidence: +0.01 } },
+        ],
+      },
+    ];
+    const t = this.rng.pick(templates);
+    this.pendingDecisions.push(t);
+  }
+
+  resolveDecision(optionIndex) {
+    const d = this.pendingDecisions.shift();
+    if (!d) return;
+    const eff = d.options[optionIndex]?.effect ?? {};
+    if (eff.budget) this.board.budget += eff.budget;
+    if (eff.confidence) this.board.confidence = clamp01(this.board.confidence + eff.confidence);
+    if (eff.morale) this.squadMorale = clamp(this.squadMorale + eff.morale, 0, 100);
+    this.pushNews(`Decision: "${d.options[optionIndex]?.label}".`);
+  }
+
+  teamStarAvg() {
+    const seven = this.squad.slice().sort((a, b) => b.overall - a.overall).slice(0, 7);
+    return seven.reduce((s, p) => s + starRating(p.overall), 0) / Math.max(1, seven.length);
   }
 
   serialise() {
@@ -298,6 +462,8 @@ export class ManagerCareer {
       fixtures: this.fixtures,
       rosters: this.league.rosters,
       freeAgents: this.freeAgents,
+      squadMorale: this.squadMorale, academyIntake: this.academyIntake,
+      market: this.market, pendingDecisions: this.pendingDecisions, transferBudgetUsed: this.transferBudgetUsed,
     };
   }
 
@@ -307,10 +473,20 @@ export class ManagerCareer {
       season: data.season, round: data.round, table: data.table, results: data.results,
       trainingFocus: data.trainingFocus, board: data.board, news: data.news,
       state: data.state, fixtures: data.fixtures, freeAgents: data.freeAgents,
+      squadMorale: data.squadMorale ?? 72, academyIntake: data.academyIntake ?? [],
+      market: data.market ?? c.market, pendingDecisions: data.pendingDecisions ?? [],
+      transferBudgetUsed: data.transferBudgetUsed ?? 0,
     });
     if (data.rosters) league.rosters = data.rosters;
     return c;
   }
+}
+
+const FIRST_NAMES = ['Marko','Iker','Teo','Luka','Nils','Andrei','Dario','Emil','Sandor','Vito','Kasper','Renzo','Milos','Arno','Bram','Zoran','Tomas','Elio','Rafa','Osian','Janek','Nico','Sten','Alvaro','Erol','Pau','Vasco','Hektor','Joris','Matej'];
+const LAST_NAMES = ['Vaquero','Draskovic','Lindqvist','Marchetti','Petrov','Kovacic','Nyland','Barsi','Ferreiro','Oksanen','Delfino','Radovic','Weiss','Nowak','Milic','Sorrentino','Aguirre','Bakker','Cortese','Zoric','Almeida','Hedberg','Lourenco','Vasilev','Brand','Mestre','Kallio','Duarte','Simic','Rovere'];
+function starWord(overall) {
+  const st = starRating(overall);
+  return `${st}\u2605`;
 }
 
 /** Double round robin, shuffled, using the circle method. */
@@ -354,7 +530,7 @@ function ordinal(n) {
 // Career screens
 // ===========================================================================
 
-registerScreen('careerSetup', (game, params, mgr) => shell('Manager Career', (body) => {
+registerScreen('careerSetup', (game, params, mgr) => shell('Coach Career', (body) => {
   body.appendChild(el('p', null, 'Choose the club you will manage. Board expectations follow club prestige.'));
 
   const saved = game.loadCareerSave();
@@ -412,7 +588,31 @@ registerScreen('careerHub', (game, params, mgr) => shell('Career', (body) => {
   cb.appendChild(cf);
   conf.appendChild(cb);
   head.appendChild(conf);
+  // Team stars + squad morale readout.
+  const teamInfo = el('div', 'tc-stats');
+  const addI = (label, val, color) => { const d = el('div', 'tc-stat'); const b = el('b', null, val); if (color) b.style.color = color; d.appendChild(b); d.appendChild(document.createTextNode(label)); teamInfo.appendChild(d); };
+  addI('TEAM STARS', c.teamStarAvg ? c.teamStarAvg().toFixed(1) + '\u2605' : '-', '#f4c430');
+  addI('SQUAD MORALE', Math.round(c.squadMorale ?? 72), (c.squadMorale ?? 72) > 55 ? '#5ef08a' : '#ffcf4d');
+  addI('TRANSFER BUDGET', '$' + (c.board.budget));
+  head.appendChild(teamInfo);
   body.appendChild(head);
+
+  // Pending coach decision.
+  if (c.pendingDecisions && c.pendingDecisions.length) {
+    const d = c.pendingDecisions[0];
+    const dc = el('div', 'card');
+    dc.style.marginTop = '14px'; dc.style.borderLeft = '4px solid #f4c430';
+    dc.appendChild(el('h3', null, 'A Decision To Make'));
+    dc.appendChild(el('p', null, d.text));
+    const opts = el('div', 'field-control');
+    d.options.forEach((o, i) => {
+      const b = el('button', 'chip', o.label);
+      b.addEventListener('click', () => { c.resolveDecision(i); game.saveCareer(); mgr.show('careerHub'); });
+      opts.appendChild(b);
+    });
+    dc.appendChild(opts);
+    body.appendChild(dc);
+  }
 
   const cols = el('div', 'grid grid-2');
   cols.style.marginTop = '14px';
@@ -473,8 +673,10 @@ registerScreen('careerHub', (game, params, mgr) => shell('Career', (body) => {
     () => mgr.show('careerTactics')));
   list.appendChild(menuItem('League Table', 'Standings, fixtures and results.', null,
     () => mgr.show('careerTable')));
-  list.appendChild(menuItem('Transfers', 'Free agents available to sign, and releases.', null,
-    () => mgr.show('careerTransfers')));
+  list.appendChild(menuItem('Player Market', 'Scout and sign players for a transfer fee, plus free agents.', null,
+    () => mgr.show('careerMarket')));
+  list.appendChild(menuItem('Academy Intake', `Sign youth prospects${c.academyIntake?.length ? ' (' + c.academyIntake.length + ' available)' : ''}.`, null,
+    () => mgr.show('careerAcademy')));
   body.appendChild(list);
 
   // ---- News --------------------------------------------------------------
@@ -505,8 +707,8 @@ registerScreen('careerSquad', (game, params, mgr) => shell('Squad', (body) => {
   const table = el('table', 'data');
   const thead = el('thead');
   const hr = el('tr');
-  for (const h of ['Cap', 'Name', 'Pos', 'Age', 'OVR', 'POT', 'Condition', 'Form', 'Apps', 'Status']) {
-    hr.appendChild(el('th', ['OVR', 'POT', 'Age', 'Apps'].includes(h) ? 'num' : null, h));
+  for (const h of ['Cap', 'Name', 'Pos', 'Age', 'OVR', 'Stars', 'POT', 'Cond', 'Form', 'Apps', 'Status']) {
+    hr.appendChild(el('th', ['OVR', 'Age', 'Apps'].includes(h) ? 'num' : null, h));
   }
   thead.appendChild(hr);
   table.appendChild(thead);
@@ -521,7 +723,8 @@ registerScreen('careerSquad', (game, params, mgr) => shell('Squad', (body) => {
     tr.appendChild(el('td', null, p.position));
     tr.appendChild(el('td', 'num', String(p.age)));
     tr.appendChild(el('td', 'num', String(p.overall)));
-    tr.appendChild(el('td', 'num', String(p.potential)));
+    const st = el('td', null, starString(p.overall)); st.style.color = '#f4c430'; tr.appendChild(st);
+    const pot = el('td', null, `${p.pot10 ?? '-'}/10`); pot.style.color = (p.pot10 ?? 0) >= 8 ? '#5ef08a' : (p.pot10 ?? 0) >= 6 ? '#8be9fd' : 'var(--muted)'; tr.appendChild(pot);
     const cond = el('td', 'num', `${Math.round(s.condition * 100)}%`);
     cond.style.color = s.condition > 0.8 ? '#4ade80' : s.condition > 0.55 ? '#fbbf24' : '#f87171';
     tr.appendChild(cond);
@@ -696,4 +899,73 @@ registerScreen('careerTransfers', (game, params, mgr) => shell('Transfers', (bod
   back.addEventListener('click', () => mgr.show('careerHub'));
   a.appendChild(back);
   body.appendChild(a);
+}));
+
+
+// --- Player Market -----------------------------------------------------------
+registerScreen('careerMarket', (game, params, mgr) => shell('Player Market', (body) => {
+  const c = game.career;
+  body.appendChild(el('p', null, `Transfer budget: $${c.board.budget}. Sign players for a fee (potential shown 1-10). Free agents cost only wages.`));
+
+  const section = (title, list, from) => {
+    const card = el('div', 'card'); card.style.marginTop = '14px';
+    card.appendChild(el('h3', null, title));
+    const table = el('table', 'data'); const thead = el('thead'); const hr = el('tr');
+    for (const h of ['Name', 'Pos', 'Age', 'OVR', 'Stars', 'POT', 'Fee', '']) hr.appendChild(el('th', h === 'OVR' ? 'num' : null, h));
+    thead.appendChild(hr); table.appendChild(thead);
+    const tb = el('tbody');
+    for (const p of list) {
+      const tr = el('tr');
+      tr.appendChild(el('td', null, p.name));
+      tr.appendChild(el('td', null, p.position));
+      tr.appendChild(el('td', 'num', String(p.age)));
+      tr.appendChild(el('td', 'num', String(p.overall)));
+      const st = el('td', null, starString(p.overall)); st.style.color = '#f4c430'; tr.appendChild(st);
+      const pot = el('td', null, `${p.pot10}/10`); pot.style.color = p.pot10 >= 8 ? '#5ef08a' : p.pot10 >= 6 ? '#8be9fd' : 'var(--muted)'; tr.appendChild(pot);
+      tr.appendChild(el('td', 'num', from === 'free' ? 'Free' : `$${p.askingPrice}`));
+      const td = el('td'); const b = el('button', 'chip', 'Sign');
+      b.disabled = (from !== 'free' && p.askingPrice > c.board.budget) || c.squad.length >= 18;
+      b.addEventListener('click', () => { const r = c.signProspect(p.id, from); if (!r.ok) mgr.toast(humanise(r.reason)); else { game.saveCareer(); mgr.show('careerMarket'); } });
+      td.appendChild(b); tr.appendChild(td);
+      tb.appendChild(tr);
+    }
+    table.appendChild(tb); card.appendChild(table); body.appendChild(card);
+  };
+  section('Transfer targets', c.market ?? [], 'market');
+  if (c.freeAgents?.length) section('Free agents', c.freeAgents, 'free');
+
+  const a = el('div', 'actions'); const back = el('button', 'btn ghost', 'Back'); back.addEventListener('click', () => mgr.show('careerHub'));
+  a.appendChild(back); body.appendChild(a);
+}));
+
+// --- Academy Intake ----------------------------------------------------------
+registerScreen('careerAcademy', (game, params, mgr) => shell('Academy Intake', (body) => {
+  const c = game.career;
+  body.appendChild(el('p', null,
+    'Every season the academy produces prospects. They start raw (1-2 stars) but a high potential (up to 10) means a gem can grow into a 5-star player over a few seasons of game time and development. Sign the ones you believe in.'));
+  if (!c.academyIntake || !c.academyIntake.length) {
+    body.appendChild(el('div', 'card', ''));
+    body.lastChild.appendChild(el('h3', null, 'No prospects right now'));
+    body.lastChild.appendChild(el('p', null, 'The next intake arrives at the start of next season.'));
+  } else {
+    const grid = el('div', 'grid grid-3');
+    for (const p of c.academyIntake) {
+      const card = el('div', 'card');
+      card.appendChild(el('div', 'tc-name', p.name));
+      card.appendChild(el('div', 'tc-city', `${POSITION_NAMES[p.position]} · age ${p.age}`));
+      const stars = el('div', null, starString(p.overall)); stars.style.color = '#f4c430'; stars.style.fontSize = '15px'; card.appendChild(stars);
+      const potRow = el('div', 'mi-desc');
+      potRow.innerHTML = `OVR <b>${p.overall}</b> · Potential <b style="color:${p.pot10 >= 8 ? '#5ef08a' : '#8be9fd'}">${p.pot10}/10</b>`;
+      card.appendChild(potRow);
+      const b = el('button', 'chip', `Sign · $${p.askingPrice}`);
+      b.style.marginTop = '10px';
+      b.disabled = p.askingPrice > c.board.budget || c.squad.length >= 18;
+      b.addEventListener('click', () => { const r = c.signProspect(p.id, 'academy'); if (!r.ok) mgr.toast(humanise(r.reason)); else { game.saveCareer(); mgr.show('careerAcademy'); } });
+      card.appendChild(b);
+      grid.appendChild(card);
+    }
+    body.appendChild(grid);
+  }
+  const a = el('div', 'actions'); const back = el('button', 'btn ghost', 'Back'); back.addEventListener('click', () => mgr.show('careerHub'));
+  a.appendChild(back); body.appendChild(a);
 }));
