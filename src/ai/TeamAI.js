@@ -254,6 +254,32 @@ export class TeamAI {
     const opp = sim.activeAthletes(this.side === 'home' ? 'away' : 'home');
     const attacking = sim.possession === this.side;
 
+    // Swim-off: exactly ONE athlete (the fastest) sprints for the centre ball.
+    // Everyone else takes up their attacking formation, so the pool does not
+    // collapse into a scrum at the half line.
+    if (sim.state === 'swimOff') {
+      const field = mine.filter((p) => p.inPool && !p.isGoalkeeper);
+      if (!this._sprinter || !field.includes(this._sprinter)) {
+        this._sprinter = field.slice().sort((a, b) => b.player.attr.swimSpeed - a.player.attr.swimSpeed)[0];
+      }
+      const system = OFFENSIVE_SYSTEMS[this.tactics.offense];
+      let slotI = 0;
+      for (const p of field) {
+        if (sim.userControlsSide === this.side && p === sim.userAthlete) continue;
+        if (p === this._sprinter) {
+          const to = new Vec2(sim.ball.pos.x - p.pos.x, sim.ball.pos.z - p.pos.z);
+          p.cmd = { dir: to.length() > 0.1 ? to.normalize() : null, effort: 1, rise: 0, face: null, brace: false };
+        } else {
+          const slot = system.slots[slotI % system.slots.length]; slotI++;
+          const w = slotToWorld(slot, p.attackDir, sim.profile);
+          const to = new Vec2(w.x - p.pos.x, w.z - p.pos.z);
+          p.cmd = { dir: to.length() > 0.4 ? to.normalize() : null, effort: clamp01(to.length() / 4) * 0.7, rise: 0.2, face: null, brace: false };
+        }
+      }
+      return;
+    }
+    this._sprinter = null;
+
     if (sim.roleDirty || this._lastPhase !== attacking || this._lastCount !== mine.length) {
       this.assignRoles(ctx);
       this._lastPhase = attacking;
@@ -281,6 +307,38 @@ export class TeamAI {
           ? this._offense(p, dt, ctx, mayAct, opp, mine)
           : this._defense(p, dt, ctx, mayAct, opp, mine));
       p.cmd = cmd;
+    }
+
+    // Hard spacing pass: off-ball teammates actively keep clear water between
+    // them so the pool never collapses into a scrum around the ball. This runs
+    // after per-athlete decisions and gently overrides their heading when they
+    // are crowding a teammate - the single biggest readability/playability win.
+    this._enforceSpacing(sim, mine);
+  }
+
+  _enforceSpacing(sim, mine) {
+    const SPACE = 3.1;
+    for (const p of mine) {
+      if (!p.inPool || p.isGoalkeeper || !p.cmd) continue;
+      if (p === sim.ball.holder) continue;                 // the carrier goes where it wants
+      if (sim.userControlsSide === this.side && p === sim.userAthlete) continue;
+      // The single nearest teammate to the ball is allowed to approach it.
+      let sx = 0, sz = 0, crowd = 0;
+      for (const t of mine) {
+        if (t === p || t.isGoalkeeper || !t.inPool) continue;
+        const d = dist2(p.pos, t.pos);
+        if (d < SPACE && d > 1e-3) { sx += (p.pos.x - t.pos.x) / d * (SPACE - d); sz += (p.pos.z - t.pos.z) / d * (SPACE - d); crowd++; }
+      }
+      if (!crowd) continue;
+      const sep = new Vec2(sx, sz);
+      if (sep.length() < 0.05) continue;
+      sep.normalize();
+      const cur = p.cmd.dir ?? new Vec2(0, 0);
+      // Blend: the tighter the crowding, the more separation dominates.
+      const w = clamp01(0.4 + crowd * 0.25);
+      const blended = new Vec2(cur.x * (1 - w) + sep.x * (0.6 + w), cur.z * (1 - w) + sep.z * (0.6 + w));
+      if (blended.length() > 0.05) { blended.normalize(); p.cmd.dir = blended; }
+      p.cmd.effort = Math.max(p.cmd.effort ?? 0, 0.5);
     }
   }
 
