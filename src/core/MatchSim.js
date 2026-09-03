@@ -1261,6 +1261,7 @@ export class MatchSim {
     shooter.charging = null;
     shooter.chargeTime = 0;
     shooter.actionLock = shotType === SHOT_TYPES.QUICK ? 0.18 : 0.38;
+    shooter.catchCooldown = Math.max(shooter.catchCooldown, 0.35);  // don't re-grab your own shot
     shooter.stats.shots++;
     shooter.stats.shotLocations.push({ x: +shooter.pos.x.toFixed(2), z: +shooter.pos.z.toFixed(2), type: shotType, q: +res.quality.toFixed(3) });
     this.stats[shooter.side].shots++;

@@ -35,6 +35,7 @@ export class Input2D {
     this.pressed = new Set();
     this.released = new Set();
     this.stick = { x: 0, y: 0, active: false };  // touch joystick, -1..1
+    this._shootLatch = false;
     this.touchButtons = {};
     this._time = 0;
 
@@ -130,6 +131,9 @@ export class Input2D {
     }
 
     const a = sim.userAthlete;
+    // One press = one shot: the latch clears the moment SHOOT is released, no
+    // matter who has the ball, so you can always shoot your next possession.
+    if (!this.isDown('action1')) this._shootLatch = false;
     if (!a || !a.inPool) { this._clear(); return cmd; }
 
     // ---- Movement (screen -> world, flip-aware) --------------------------
@@ -166,24 +170,39 @@ export class Input2D {
   _attackOnBall(a, cmd, sxin, syin, flip) {
     const sim = this.sim;
 
-    // Shoot: press to start charging, release to fire.
-    if (this.hit('action1') && a.actionLock <= 0) { a.charging = 'shot'; a.chargeTime = 0; }
-    if (a.charging === 'shot') {
-      // Aim with the stick while charging.
+    // SHOOT - simple and reliable (arcade). Holding SHOOT fires exactly one shot
+    // the instant the athlete is free to shoot; you keep holding to "aim" (the
+    // longer you hold before it can fire, the more you can steer the aim). It
+    // latches so one press = one shot, and it can never be swallowed by a brief
+    // action lock the frame you press, which is what made shooting feel broken.
+    const holdingShoot = this.isDown('action1');
+    if (holdingShoot) {
+      a.charging = 'shot';                                 // drives the aim line + rise pose
       const s = flip ? -1 : 1;
-      sim.lastAim = sim.lastAim ?? { x: 0, y: 0.5 };
-      if (Math.abs(sxin) > 0.1) sim.lastAim.x = clamp(sim.lastAim.x + s * sxin * 0.06, -1, 1);
-      if (Math.abs(syin) > 0.1) sim.lastAim.y = clamp(sim.lastAim.y - syin * 0.05, 0, 1);
-      cmd.rise = 0.9; cmd.effort = Math.min(cmd.effort, 0.2);
+      sim.lastAim = sim.lastAim ?? { x: 0, y: 0.4 };
+      if (Math.abs(sxin) > 0.1) sim.lastAim.x = clamp(sim.lastAim.x + s * sxin * 0.05, -1, 1);
+      if (Math.abs(syin) > 0.1) sim.lastAim.y = clamp(sim.lastAim.y - syin * 0.04, 0, 1);
+      cmd.rise = 0.9; cmd.effort = Math.min(cmd.effort, 0.25);
       const goalZ = a.attackDir * (sim.profile.field.length / 2);
-      cmd.face = Math.atan2(sim.lastAim.x * (sim.profile.field.goalWidth / 2) - a.pos.x, goalZ - a.pos.z);
-    }
-    if (a.charging === 'shot' && (this.up('action1') || a.chargeTime > 1.5)) {
-      const charge = clamp01(a.chargeTime / 0.85);
-      const type = this.isDown('action3') ? SHOT_TYPES.SKIP
-        : this.isDown('modifier') ? SHOT_TYPES.QUICK : null;
-      const aim = sim.lastAim ?? { x: 0.5, y: 0.35 };
-      sim.tryShot(a, aim, type, clamp01(0.4 + charge * 0.7));
+      cmd.face = Math.atan2((sim.lastAim.x * (sim.profile.field.goalWidth / 2)) - a.pos.x, goalZ - a.pos.z);
+      a.chargeTime = (a.chargeTime || 0) + 0;              // (kept in sim._driveAthletes)
+
+      if (!this._shootLatch && a.actionLock <= 0) {
+        // Auto-aim toward the corner away from the keeper unless you steered it.
+        const gk = sim.goalkeeperFor(sim.opponentSide(a.side));
+        if (gk && Math.abs(sxin) < 0.1 && Math.abs(sim.lastAim.x) < 0.15) {
+          sim.lastAim.x = clamp(-Math.sign((gk.pos.x - a.pos.x * 0.3) || 1) * 0.7, -0.85, 0.85);
+        }
+        const type = this.isDown('action3') ? SHOT_TYPES.SKIP
+          : this.isDown('modifier') ? SHOT_TYPES.QUICK : null;
+        // Power scales a little with how far out you are, but is always a real shot.
+        const dist = Math.hypot(a.pos.x, goalZ - a.pos.z);
+        const power = clamp01(0.7 + dist / 30);
+        sim.tryShot(a, { ...sim.lastAim }, type, power);
+        this._shootLatch = true;
+        a.charging = null;
+      }
+    } else if (a.charging === 'shot') {
       a.charging = null;
     }
 
