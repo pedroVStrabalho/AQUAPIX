@@ -47,6 +47,10 @@ export const PASS_TYPES = {
   ONE_TOUCH: 'oneTouch',
   SAFETY: 'safety',
   LOB_RELEASE: 'lobRelease',
+  /** A high, soft pass lofted over a defender's reach. The lob control was
+   *  bound to this type but the type itself was never defined, so the modifier
+   *  resolved to `undefined` and threw an ordinary flat pass. */
+  LOB: 'lobPass',
   RESTART: 'restart',
   GK_OUTLET: 'gkOutlet',
 };
@@ -158,6 +162,7 @@ export function resolvePass(passer, target, opts) {
   if (type === PASS_TYPES.WET) speed *= 0.92;
   if (type === PASS_TYPES.LOB_RELEASE) speed *= 0.7;
 
+
   // --- Accuracy ----------------------------------------------------------
   // Error is an angle, so long passes miss by more metres from the same skill.
   let errRad = lerp(0.155, 0.017, factors.control * 0.6 + factors.technique * 0.4)
@@ -184,7 +189,31 @@ export function resolvePass(passer, target, opts) {
   if (wet) rise = Math.min(rise, 1.4);
   launchY = rise;
 
-  const horiz = speed;
+  let horiz = speed;
+
+  // A genuine lob: a slow, high ball dropped over a defender's reach and INTO
+  // the receiver's hands. It is solved as its own trajectory rather than by
+  // adding lift to a flat pass - adding lift alone keeps the flat horizontal
+  // speed, so the ball simply sails long past the target.
+  if (type === PASS_TYPES.LOB) {
+    const flatDist = distance * distErr;
+    // Solve from the APEX, not from a flight time. Scaling the arc off distance
+    // meant a short lob barely cleared the water (measured 0.48m), which is not
+    // a lob at all - the whole point is to clear a defender's raised arm, and
+    // that height is the same whether the receiver is three metres away or ten.
+    const apex = clamp(1.5 + flatDist * 0.10, 1.5, 3.0);
+    const rise0 = Math.max(0.25, apex - from.y);
+    // The ball carries real air drag, which a pure ballistic solve ignores:
+    // measured, a drag-free 1.37m arc only reached 0.77m in flight. Compensate
+    // so the lob clears what it is aimed to clear.
+    const DRAG_COMP = 1.45;
+    const vy = Math.sqrt(2 * 9.81 * rise0) * DRAG_COMP;
+    const fall = Math.sqrt(2 * Math.max(0.05, apex - targetY) / 9.81);
+    const lobTime = Math.max(0.45, vy / 9.81 + fall);
+    horiz = flatDist / lobTime;
+    launchY = vy;
+  }
+
   const vel = { x: Math.sin(yaw) * horiz, y: launchY, z: Math.cos(yaw) * horiz };
   const spin = { x: Math.cos(yaw) * (wet ? 8 : 14), y: rng.gauss(0, 3), z: -Math.sin(yaw) * (wet ? 8 : 14) };
 

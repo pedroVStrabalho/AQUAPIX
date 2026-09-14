@@ -16,10 +16,16 @@ const KEYMAP = {
   KeyW: 'up', ArrowUp: 'up', KeyS: 'down', ArrowDown: 'down',
   KeyA: 'left', ArrowLeft: 'left', KeyD: 'right', ArrowRight: 'right',
   ShiftLeft: 'sprint', ShiftRight: 'sprint',
-  Space: 'action1',   // shoot (attack) / tackle-steal (defence)
-  KeyJ: 'action2',    // pass (attack) / switch (defence)
-  KeyK: 'action1',
-  KeyL: 'action3',    // lob/skip modifier (attack) / block (defence)
+
+  // Z / X / C sit together under the left hand while WASD steers.
+  KeyZ: 'action2',    // PASS   (attack) / switch (defence)
+  KeyX: 'action1',    // SHOOT  (attack) / steal  (defence)
+  Space: 'action1',   // shoot, alternate
+  KeyC: 'lob',        // LOB PASS - its own action, not a modifier
+
+  KeyJ: 'action2',    // legacy pass binding, kept working
+  KeyK: 'action1',    // legacy shoot binding, kept working
+  KeyL: 'action3',    // block / pump fake / skip-shot modifier
   KeyE: 'switch',     // manual switch player
   KeyQ: 'modifier',   // sprint alt / pump-fake
   KeyG: 'gk',         // toggle goalkeeper control
@@ -146,8 +152,12 @@ export class Input2D {
 
     const flip = this.renderer?.flip ?? (sim.attackDir[sim.userControlsSide] < 0);
     const s = flip ? -1 : 1;
-    let wx = s * sxin;
-    let wz = s * (-syin);
+    // Inverse of PixelRenderer.worldToScreen, which draws the pool LANDSCAPE:
+    // screen X runs along the pool's length (world z) and screen Y across its
+    // width (world x). These must be kept in step with the renderer or the
+    // controls come out rotated.
+    let wz = s * sxin;
+    let wx = s * syin;
     const mag = Math.hypot(wx, wz);
     if (mag > 0.15) {
       const v = new Vec2(wx, wz);
@@ -209,13 +219,18 @@ export class Input2D {
       a.charging = null;
     }
 
-    // Pass: to the teammate most in the pushed direction (through-ball feel).
-    if (this.hit('action2') && a.charging !== 'shot') {
+    // Pass (Z) and lob pass (C): both go to the teammate most in the pushed
+    // direction. The lob is its own key rather than a held modifier - it is a
+    // distinct pass you choose, not a variant you have to discover.
+    const wantsPass = this.hit('action2');
+    const wantsLob = this.hit('lob');
+    if ((wantsPass || wantsLob) && a.charging !== 'shot') {
       const target = this._pickReceiver(a, cmd.dir);
       if (target) {
-        const type = this.isDown('action3') ? PASS_TYPES.LEAD
+        const type = wantsLob ? PASS_TYPES.LOB
           : this.isDown('modifier') ? PASS_TYPES.DRIVEN : PASS_TYPES.DRY;
-        sim.tryPass(a, target, type, this.isDown('modifier') ? 0.9 : 0.62);
+        const power = wantsLob ? 0.7 : (this.isDown('modifier') ? 0.9 : 0.62);
+        sim.tryPass(a, target, type, power);
       }
     }
 

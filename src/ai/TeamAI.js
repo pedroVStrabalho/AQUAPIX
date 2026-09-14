@@ -382,7 +382,18 @@ export class TeamAI {
     // trickle into the net unchallenged.
     const scramble = ball.timeSinceLoose > 0.5 && myDist < 3.0;
     const isTarget = ball.kind === 'pass' && ball.intendedReceiver === p;
-    if (!isTarget && rank > (scramble ? 1 : 0)) return null;
+
+    // CRASH THE GOAL. A shot spilling around the opponent's cage is the most
+    // dangerous ball in the sport, and attackers go and get it. Leaving it to
+    // the single nearest player meant rebounds were recovered further out and
+    // under more pressure than the original shot, so second chances were worth
+    // LESS than first ones - the opposite of how water polo works.
+    const attackGoalZ = p.attackDir * (sim.profile.field.length / 2);
+    const isRebound = (ball.kind === 'shot' || ball.kind === 'deflection') &&
+      Math.abs(attackGoalZ - ball.pos.z) < 5.5;
+    const crashing = isRebound && myDist < 5.5;
+
+    if (!isTarget && rank > (crashing ? 2 : scramble ? 1 : 0)) return null;
 
     // Lead the ball rather than swimming at where it currently is.
     const lead = clamp01(myDist / 6) * 0.42;
@@ -667,7 +678,13 @@ export class TeamAI {
     // --- Execute (layer 6) -------------------------------------------------
     // Settle first: an athlete who has just taken the ball needs a beat before
     // they can do anything with it, so possessions actually develop.
-    const settled = !p.justCaught || p.justCaught < 0.34;
+    // A PUT-BACK is instant. Making a player settle before shooting gave the
+    // defence and a scrambling keeper time to reset, so a rebound collected in
+    // front of the cage was worth no more than an ordinary set shot - which is
+    // why second chances were converting worse than first ones.
+    const goalDist = Math.hypot(p.pos.x, goalZ - p.pos.z);
+    const putBack = goalDist < 4.5 && (gk ? (sim.gkBrain[gk.side]?.beaten ?? 0) > 0.15 : false);
+    const settled = putBack || !p.justCaught || p.justCaught < 0.34;
     // A shot is worth taking if it is decent, or if the clock is dying (a
     // desperation shot beats a shot-clock turnover). If the chosen shot is not
     // good enough and there is still time, the carrier falls through to driving
@@ -681,7 +698,11 @@ export class TeamAI {
       const shotOpt = options.find((o) => o.kind === 'shoot');
       if (shotOpt) choice = shotOpt;
     }
-    const willShoot = choice.kind === 'shoot' && (choice.quality > 0.14 || desperate);
+    if (putBack && choice.kind !== 'shoot') {
+      const shotOpt = options.find((o) => o.kind === 'shoot');
+      if (shotOpt) choice = shotOpt;
+    }
+    const willShoot = choice.kind === 'shoot' && (choice.quality > 0.14 || desperate || putBack);
 
     if (mayAct && !p.actionLock && settled) {
       if (willShoot) {

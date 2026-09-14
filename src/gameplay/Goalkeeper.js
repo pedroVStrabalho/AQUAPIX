@@ -160,6 +160,11 @@ export class GoalkeeperBrain {
         cmd.effort = 1;
       }
     } else {
+      // The shot has resolved. A keeper who just committed to it - dived, spread,
+      // or simply picked a side - is not instantly set again, and the put-back
+      // arrives into exactly that gap. This is what makes a second chance the
+      // most dangerous ball in water polo.
+      if (this.committed) this.beaten = Math.max(this.beaten, 0.85);
       this.committed = null;
       this.reactionDelay = 0;
 
@@ -305,7 +310,12 @@ export function attemptSave(gk, ball, brain, rng, opts = {}) {
   // flat, and a HALF-COURT shot scored as often as a point-blank one.
   const flight = ball.timeSinceLoose ?? 0;
   const readiness = clamp01((flight - 0.20) / 0.42);
-  const saveChance = clamp01(lerp(0.20, 0.97, readiness) * lerp(0.85, 1.12, control));
+  // Still scrambling from the shot they just spilled: a put-back beats them far
+  // more often than a set shot of the same quality would.
+  const scrambling = clamp01((brain?.beaten ?? 0) / 0.85);
+  const saveChance = clamp01(
+    lerp(0.20, 0.97, readiness) * lerp(0.85, 1.12, control) * lerp(1, 0.22, scrambling)
+  );
 
   const roll = rng.next();
   let outcome, vel;
@@ -325,7 +335,10 @@ export function attemptSave(gk, ball, brain, rng, opts = {}) {
     vel = { x: dirX * speed, y: Math.abs(n.y) * speed * 0.8 + 1.5, z: outward * speed * 0.7 };
   } else if (roll < saveChance) {
     outcome = 'deflection';   // uncontrolled: anywhere, but never backwards
-    const speed = ball.speed * 0.5;
+    // A fumble drops in front of the keeper - that is what a put-back is. It
+    // still carries OUTWARD so it can never cross the line, but flinging it
+    // clear at half speed removed every second chance from the game.
+    const speed = ball.speed * 0.18;
     // "Uncontrolled" means the keeper cannot choose WHERE it goes - not that it
     // goes into their own goal. The outward z is forced: a hand on the ball
     // always kills its momentum toward the line. Letting this component stay

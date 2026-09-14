@@ -306,16 +306,16 @@ const SCREENS = {
   // ------------------------------------------------------------ controls ---
   controls: (game, params, mgr) => shell('Controls', (body) => {
     const rows = [
-      ['Left stick / W A S D', 'Swim and orient the body', 'Drive, cut, reposition', 'Mark and recover', 'Position in goal'],
-      ['R2 / Shift', 'High-effort swim', 'Sprint into space', 'Recovery sprint', 'Explosive rise when set'],
-      ['L2 / Space', 'Protect the ball, precision stance', 'Establish vertical position', 'Contain, front, hold legal position', 'Set stance and angle'],
-      ['Cross / J', 'Standard pass', 'Call for the pass', 'Controlled pressure', 'Short outlet'],
-      ['Square / H', 'Driven or wet pass', 'Set a screen', 'Raise arm and block', 'Directed rebound block'],
-      ['Triangle / U', 'Lead, lob or entry pass', 'Request a lead pass', 'Tactical switch', 'Long outlet'],
-      ['Circle / K', 'Shoot (hold to charge)', 'Contextual one-touch', 'Timed steal', 'Aggressive save'],
-      ['R1 / L', 'Pump fake, quick-release modifier', 'Call teammate movement', 'Manual arm challenge', 'Block modifier'],
-      ['L1 / Q', 'Tactical modifier', 'Switch player', 'Switch controlled defender', 'Defensive command'],
-      ['Right stick / Arrows or mouse', 'Aim the shot or pass', 'Direction feint', 'Manual arm and steal direction', 'Manual save direction'],
+      ['W A S D', 'Swim and orient the body', 'Drive, cut, reposition', 'Mark and recover', 'Position in goal'],
+      ['Z', 'Pass', 'Call for the pass', 'Switch controlled defender', 'Short outlet'],
+      ['X  (or Space)', 'Shoot', 'Contextual one-touch', 'Timed steal', 'Aggressive save'],
+      ['C', 'Lob pass - lofted over a defender', 'Request a lead pass', '-', 'Long outlet'],
+      ['Shift', 'Sprint - needs 70% readiness', 'Sprint into space', 'Recovery sprint', 'Explosive rise when set'],
+      ['L', 'Pump fake, skip-shot modifier', 'Call teammate movement', 'Raise arm and block', 'Block modifier'],
+      ['Q', 'Protect the ball', 'Tactical modifier', 'Press', 'Defensive command'],
+      ['E', 'Switch player', 'Switch player', 'Switch controlled defender', '-'],
+      ['G', 'Toggle goalkeeper control', '-', '-', 'Take manual control'],
+      ['Arrows or mouse', 'Aim the shot or pass', 'Direction feint', 'Manual arm and steal direction', 'Manual save direction'],
     ];
 
     const table = el('table', 'data');

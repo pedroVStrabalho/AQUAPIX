@@ -15,8 +15,8 @@ import { PAL, snap } from './palette.js';
 import { clamp, clamp01, lerp } from '../core/Math2.js';
 import { starString } from '../data/DisplayStats.js';
 
-const PIXEL = 2;              // display pixels per art pixel (crisper but still pixel)
-const MARGIN_M = 3.2;         // metres of deck shown around the pool sides
+const PIXEL = 3;              // display pixels per art pixel (chunkier, more readable sprites)
+const MARGIN_M = 1.2;         // metres of deck shown around the pool (kept small so the pool itself is as large as possible)
 
 export class PixelRenderer {
   constructor(canvas, sim, settings = {}) {
@@ -65,11 +65,16 @@ export class PixelRenderer {
     this.ctx.imageSmoothingEnabled = false;
 
     const f = this.sim.profile.field;
-    // Scale so the full pool width (plus a little deck) fits across the screen.
-    this.scale = this.aw / (f.width + MARGIN_M * 2);
-    // Vertical span of the pool in art pixels; if it fits, no scrolling.
-    this.poolPxH = f.length * this.scale;
-    this.fitsVertically = this.poolPxH + MARGIN_M * 2 * this.scale <= this.ah;
+    // Fit the WHOLE pool on screen - both axes. Scaling to the width alone meant
+    // a 25m pool on a landscape screen ran off the top and bottom, so you were
+    // always scrolling and could never see where your team actually was.
+    // Landscape: the pool's LENGTH spans the screen width.
+    const fitW = this.aw / (f.length + MARGIN_M * 2);
+    const fitH = this.ah / (f.width + MARGIN_M * 2);
+    this.scale = Math.min(fitW, fitH);
+    this.poolPxH = f.width * this.scale;
+    this.fitsVertically = true;   // the whole pool always fits, by construction
+    this.camX = this.aw / 2;
   }
 
   /** Which way does the controlled team attack? Used to keep "up = forward". */
@@ -78,14 +83,28 @@ export class PixelRenderer {
     return this.sim.attackDir[side] < 0;
   }
 
+  /**
+   * World to screen, with the pool drawn LANDSCAPE.
+   *
+   * A water polo pool is 25m long by 20m wide - portrait - and a computer
+   * screen is landscape, so drawing it upright wasted most of the display and
+   * forced the camera to scroll. Turning it a quarter turn puts the length
+   * across the screen: the whole pool fits, and it fits BIGGER.
+   *
+   * This is a rotation, not a mirror, so left and right stay correct. The
+   * controlled team always attacks to the RIGHT (flip negates both axes).
+   */
   worldToScreen(x, z) {
-    const flip = this.flip;
-    const wx = flip ? -x : x;
-    const wz = flip ? -z : z;
-    const sx = this.aw / 2 + wx * this.scale;
-    // Camera: attacking goal (top) is +wz. Screen y increases downward.
-    const sy = this.camY - wz * this.scale;
+    const f = this.flip ? -1 : 1;
+    const sx = this.camX + (z * f) * this.scale;
+    const sy = this.ah / 2 + (x * f) * this.scale;
     return { sx, sy };
+  }
+
+  /** Rotate a world DIRECTION into screen space, matching worldToScreen. */
+  dirToScreen(dx, dz) {
+    const f = this.flip ? -1 : 1;
+    return { dx: dz * f, dy: dx * f };
   }
 
   update(dt) {
@@ -102,15 +121,9 @@ export class PixelRenderer {
     const halfL = f.length / 2;
     const targetCamZ = clamp(ballWz, -halfL + 0.5, halfL - 0.5);
     this.camZ = lerp(this.camZ, targetCamZ, 1 - Math.exp(-6 * dt));
-    if (this.fitsVertically) {
-      this.camY = this.ah / 2 + this.camZ * this.scale * 0; // centre, no scroll
-      this.camY = this.ah / 2;
-    } else {
-      // Keep the ball near the middle, but never scroll past the pool ends.
-      const minCamY = this.ah - (halfL * this.scale) - MARGIN_M * this.scale;
-      const maxCamY = (halfL * this.scale) + MARGIN_M * this.scale;
-      this.camY = clamp(this.ah / 2 + this.camZ * this.scale, minCamY, maxCamY);
-    }
+    // The whole pool is on screen, so the camera is simply centred - no scroll.
+    this.camX = this.aw / 2;
+    this.camY = this.ah / 2;
 
     // Effects.
     this._updateSplashFromSim(dt);
@@ -375,18 +388,16 @@ export class PixelRenderer {
       ctx.arc(x, snap(p.sy), 7, 0, Math.PI * 2);
       ctx.stroke();
       // A little forward chevron.
-      const fdir = this.flip ? -1 : 1;
-      const hx = Math.sin(a.heading) * (this.flip ? -1 : 1);
-      const hz = Math.cos(a.heading) * fdir;
+      const h = this.dirToScreen(Math.sin(a.heading), Math.cos(a.heading));
       ctx.fillStyle = isUser ? PAL.select : PAL.warn;
-      ctx.fillRect(x + Math.round(hx * 8) - 1, snap(p.sy) - Math.round(hz * 8) - 1, 2, 2);
+      ctx.fillRect(x + Math.round(h.dx * 9) - 1, snap(p.sy) + Math.round(h.dy * 9) - 1, 2, 2);
     }
 
     // Wake behind a moving swimmer.
     if (a.speed > 0.6) {
-      const fdir = this.flip ? -1 : 1;
-      const bx = x - Math.round(Math.sin(a.heading) * (this.flip ? -1 : 1) * 5);
-      const by = y + Math.round(Math.cos(a.heading) * fdir * 5);
+      const h = this.dirToScreen(Math.sin(a.heading), Math.cos(a.heading));
+      const bx = x - Math.round(h.dx * 5);
+      const by = y - Math.round(h.dy * 5);
       ctx.fillStyle = 'rgba(220,240,255,0.25)';
       ctx.fillRect(bx - 1, by - 1, 3, 2);
     }
@@ -641,18 +652,17 @@ export class PixelRenderer {
       // Stars.
       this._text(starString(a.player.overall), cardW - 4, cardY + 2, PAL.warn, 'right', 6);
 
-      // Stamina (burst) bar.
-      this._text('STA', 5, cardY + 17, PAL.inkDim, 'left', 5);
-      ctx.fillStyle = '#0a2634'; ctx.fillRect(22, cardY + 17, 54, 3);
-      ctx.fillStyle = a.burst > 0.5 ? PAL.go : a.burst > 0.25 ? PAL.warn : PAL.danger;
-      ctx.fillRect(22, cardY + 17, Math.round(54 * clamp01(a.burst)), 3);
-
-      // Cansaco (accumulated match fatigue) bar - fills as the athlete tires.
-      this._text('CANSAÇO', 5, cardY + 23, PAL.inkDim, 'left', 5);
-      ctx.fillStyle = '#0a2634'; ctx.fillRect(34, cardY + 23, 42, 3);
-      const fat = clamp01(a.matchFatigue / 0.9);
-      ctx.fillStyle = fat > 0.66 ? PAL.danger : fat > 0.33 ? PAL.warn : PAL.select;
-      ctx.fillRect(34, cardY + 23, Math.round(42 * fat), 3);
+      // READINESS. One bar, in English. Stamina is an ATTRIBUTE - it belongs on
+      // the player's profile, not on a live bar that appears to swing wildly
+      // mid-match. The sprint cut-off is marked on the bar so you can see it.
+      const rdy = clamp01(a.readiness);
+      this._text('READY', 5, cardY + 18, PAL.inkDim, 'left', 5);
+      ctx.fillStyle = '#0a2634'; ctx.fillRect(30, cardY + 18, 46, 4);
+      ctx.fillStyle = rdy >= 0.7 ? PAL.go : rdy > 0.4 ? PAL.warn : PAL.danger;
+      ctx.fillRect(30, cardY + 18, Math.round(46 * rdy), 4);
+      // Sprint threshold tick at 70%.
+      ctx.fillStyle = PAL.inkDim;
+      ctx.fillRect(30 + Math.round(46 * 0.7), cardY + 17, 1, 6);
 
       // Personal fouls.
       const lim = sim.profile.discipline.personalFoulLimit;

@@ -775,6 +775,15 @@ export class MatchSim {
       // shots as ordinary loose balls, bypassing attemptSave entirely - which is
       // why the goal looked impossible to beat from close range and why tuning
       // the save model changed nothing. Slow or spent shots are still gatherable.
+      // A keeper still scrambling from the shot they just spilled cannot calmly
+      // collect their own fumble. Without this they re-gathered nearly every
+      // rebound and the put-back - the most dangerous ball in the sport -
+      // effectively did not exist.
+      if (a.isGoalkeeper && b.kind === 'deflection') {
+        const brain = this.gkBrain[a.side];
+        if (brain && brain.beaten > 0.2) continue;
+      }
+
       if (a.isGoalkeeper && b.kind === 'shot' && b.speed > 6) {
         const gz = -a.attackDir * (this.profile.field.length / 2);
         const towardMyGoal = Math.sign(b.vel.z) === Math.sign(gz - b.pos.z);
@@ -886,6 +895,10 @@ export class MatchSim {
         this._openTransition(side);
         gk.stats.reboundsControlled++;
       } else {
+        // A keeper who has spilled the ball is scrambling, not set. The rebound
+        // that follows meets a goalkeeper still recovering their position, which
+        // is what makes a put-back the most dangerous ball in water polo.
+        brain.beaten = 0.95;
         this.ball.launch(
           { x: this.ball.pos.x, y: Math.max(0.2, this.ball.pos.y), z: this.ball.pos.z },
           res.vel, { x: 0, y: 0, z: 0 }, 'deflection', gk
@@ -1276,6 +1289,12 @@ export class MatchSim {
 
     passer.hasBall = false;
     passer.actionLock = lerp(0.34, 0.16, clamp01((passer.player.attr.quickRelease - 10) / 85));
+    // Do not let the passer re-grab their own pass. tryShot has always done
+    // this; tryPass never did, so the passer - who is by definition the closest
+    // athlete to the ball the instant it leaves their hand - simply caught it
+    // straight back. That is the "I press pass, the ball leaves my hand and
+    // comes back" bug, and it hit the AI just as hard as the player.
+    passer.catchCooldown = Math.max(passer.catchCooldown, 0.5);
     passer.stats.passesAttempted++;
     this.stats[passer.side].passesAttempted++;
     this.ball.intendedReceiver = res.receiver;

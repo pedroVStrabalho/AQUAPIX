@@ -136,8 +136,8 @@ export class MatchHUD {
             <div class="mh-cmeta">${a.player.position} · OVR ${a.player.overall} <span class="mh-stars">${starString(a.player.overall)}</span></div>
           </div>
         </div>
-        <div class="mh-barrow"><span>STA</span><div class="mh-bar"><i style="width:${Math.round(clamp01(a.burst) * 100)}%;background:${a.burst > 0.5 ? '#5ef08a' : a.burst > 0.25 ? '#ffcf4d' : '#ff5a5a'}"></i></div></div>
-        <div class="mh-barrow"><span>CANSAÇO</span><div class="mh-bar"><i style="width:${Math.round(clamp01(a.matchFatigue / 0.9) * 100)}%;background:#ff8a4d"></i></div></div>
+
+        <div class="mh-barrow"><span>READINESS</span><div class="mh-bar"><i style="width:${Math.round(clamp01(a.readiness) * 100)}%;background:${a.readiness >= 0.7 ? '#5ef08a' : a.readiness > 0.4 ? '#ffcf4d' : '#ff5a5a'}"></i></div></div>
         <div class="mh-fouls">${Array.from({ length: lim }, (_, i) => `<b class="${i < a.personalFouls ? 'on' : ''}"></b>`).join('')}<span>fouls</span></div>`;
     } else {
       this.card.style.display = 'none';
@@ -160,15 +160,15 @@ export class MatchHUD {
     } else if (a.hasBall) {
       items = touch
         ? [['SHOOT', 'hold + release'], ['PASS', 'to a teammate'], ['SWIM', 'sprint']]
-        : [['SPACE', 'Shoot (hold=power)'], ['J', 'Pass'], ['L', 'Skip/Lob'], ['⇧', 'Sprint'], ['Q', 'Protect']];
+        : [['X', 'Shoot'], ['Z', 'Pass'], ['C', 'Lob pass'], ['⇧', 'Sprint'], ['Q', 'Protect']];
     } else if (sim.possession === a.side) {
       items = touch
         ? [['SWIM', 'get open'], ['PASS', 'call']]
-        : [['WASD', 'Move / get open'], ['J', 'Call for ball'], ['⇧', 'Sprint']];
+        : [['WASD', 'Move / get open'], ['Z', 'Call for ball'], ['⇧', 'Sprint']];
     } else {
       items = touch
         ? [['STEAL', 'tackle'], ['SWITCH', 'nearest']]
-        : [['SPACE', 'Steal'], ['L', 'Block/raise arm'], ['⇧', 'Press'], ...(sim.lockUserAthlete ? [] : [['E', 'Switch player']])];
+        : [['X', 'Steal'], ['L', 'Block/raise arm'], ['⇧', 'Press'], ...(sim.lockUserAthlete ? [] : [['E', 'Switch player']])];
     }
     this.controls.innerHTML = items.map(([k, d]) => `<span class="mh-ctl"><b>${k}</b>${d}</span>`).join('');
   }

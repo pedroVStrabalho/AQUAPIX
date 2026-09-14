@@ -18,6 +18,12 @@ import { Vec2, clamp, clamp01, lerp, damp, angleDelta, turnToward, smoothstep } 
 /** Attribute 1-99 to a 0-1 curve that keeps mid ratings meaningful. */
 const a01 = (v) => clamp01((v - 10) / 85);
 
+/** Readiness thresholds and recovery rates (fractions per second). */
+const READY_SPRINT_START = 0.75;   // needed to BEGIN a sprint
+const READY_SPRINT_MIN = 0.70;     // sprint cuts out below this
+const READY_REFILL_STILL = 0.08;   // treading water
+const READY_REFILL_SWIM = 0.03;    // swimming gently
+
 export const LOCOMOTION = {
   SPRINT: 'sprint',           // horizontal high-effort swimming
   SWIM: 'swim',               // controlled head-up swimming
@@ -64,7 +70,7 @@ export class Athlete {
     this.shoulder = this.heading;
 
     // --- Effort and stamina (section 17.1: three connected layers) ---------
-    this.burst = 1;        // immediate exertion, seconds-scale
+    this.burst = 1;        // stored name for READINESS - starts full
     this.pool = 1;         // possession-level recovery, tens of seconds
     this.matchFatigue = 0; // accumulates across the match, lowers capacity
     this.exertion = 0;     // smoothed instantaneous output, drives animation
@@ -151,6 +157,11 @@ export class Athlete {
    *   cmd.brace   {boolean}    hold legal defensive position / protect ball
    * @param {object} world { profile, pool }
    */
+  /** Readiness, 0..1. Full at 100%; below 70% the athlete cannot sprint. */
+  get readiness() { return this.burst; }
+  /** Can this athlete start a sprint right now? */
+  get canSprint() { return this.burst >= READY_SPRINT_START; }
+
   update(dt, cmd, world) {
     if (!this.inPool) {
       this.exertion = damp(this.exertion, 0, 4, dt);
@@ -210,9 +221,30 @@ export class Athlete {
 
     // ---- Propulsion -------------------------------------------------------
     const fatigueSpeed = lerp(0.62, 1.0, this.freshness);
-    const ballPenalty = this.hasBall ? lerp(0.86, 0.96, a01(this.player.attr.ballSecurity)) : 1;
-    // Sprint is a real burst you can feel, paid for in burst stamina.
-    const sprintBoost = (cmd.sprint && this.burst > 0.08) ? lerp(1.0, 1.3, clamp01(this.burst)) : 1;
+    // Dribbling is SLOW. You swim head-up with the ball between your forearms -
+    // you cannot take a proper stroke. At the old 4-14% cost a carrier who
+    // sprinted moved faster than a free defender could cruise, so anyone who won
+    // the ball simply swam the length of the pool and scored untouched.
+    const ballPenalty = this.hasBall ? lerp(0.66, 0.78, a01(this.player.attr.ballSecurity)) : 1;
+    // Sprint is a real burst you can feel, paid for in burst stamina - but you
+    // cannot sprint while controlling the ball, so the carrier must pass.
+    const sprintCeiling = this.hasBall ? 1.06 : 1.3;
+    // Hold the full boost until the burst is nearly spent, then fall away. Making
+    // it proportional to remaining burst meant the boost decayed faster than the
+    // athlete could accelerate into it, so sprinting was actually SLOWER than
+    // cruising - it cost stamina and delivered nothing.
+    // READINESS GATES THE SPRINT. Below 70% the athlete simply cannot sprint any
+    // more and has to recover first, which is what stops a match becoming one
+    // swimmer holding sprint from end to end. The start/continue thresholds
+    // differ slightly so it cannot stutter on and off at exactly the line.
+    if (this._sprinting) {
+      if (this.readiness < READY_SPRINT_MIN) this._sprinting = false;
+    } else if (cmd.sprint && this.readiness >= READY_SPRINT_START) {
+      this._sprinting = true;
+    }
+    if (!cmd.sprint) this._sprinting = false;
+    const canSprint = this._sprinting;
+    const sprintBoost = canSprint ? lerp(1.0, sprintCeiling, clamp01(this.readiness / 0.32)) : 1;
     let vMax = this.maxSpeed * fatigueSpeed * ballPenalty * sprintBoost
       * lerp(0.70, 1.0, effort > 0 ? lerp(0.7, 1, effort) : 0.7);
     // Arrival damping: when the caller says how far the target is, cap speed to
@@ -273,10 +305,13 @@ export class Athlete {
     // you. Without this, "always full effort" movement drains everyone in
     // seconds and the whole pool looks exhausted from nowhere.
     const workload =
-      effort * (cmd.sprint ? 1.05 : 0.34) * this.enduranceK +
+      // You cannot generate a true sprint effort while controlling the ball, so
+      // it costs less - otherwise holding sprint with the ball made you slower
+      // than not holding it, which reads as a broken button.
+      effort * (canSprint ? (this.hasBall ? 0.5 : 1.05) : 0.34) * this.enduranceK +
       rise * rise * this.burstK * 0.7 +
       this.contactLoad * 0.5;
-    this._recover(dt, workload);
+    this._recover(dt, workload, effort);
     this.exertion = damp(this.exertion, clamp01(workload * 0.9 + speedFrac * 0.35), 6, dt);
 
     if (sprinting && !this._wasSprinting) this.sprintEfforts++;
@@ -305,13 +340,20 @@ export class Athlete {
     if (brace) this.elevation = Math.max(this.elevation, this.maxElevation * 0.22 * legFresh);
   }
 
-  _recover(dt, workload) {
-    // Immediate exertion: drains under load, refills quickly at rest but is
-    // capped by the slower pool and by accumulated match fatigue.
-    const drain = workload * 0.62;
-    const refill = (1 - clamp01(workload * 2.2)) * lerp(0.16, 0.42, a01(this.player.attr.effortRecovery));
+  _recover(dt, workload, effort = 0) {
+    // READINESS. Starts full, drains under load, and comes back at a pace you
+    // can feel: about 8% per second treading water, about 3% per second while
+    // swimming gently. Sprinting is the only thing that empties it quickly.
+    const rest = clamp01(1 - effort);
+    // Recovery only happens when you are actually taking it easy. Without this
+    // gate an athlete hammering explosive eggbeater counted as "still" - they
+    // were not swimming - and recovered as fast as they spent, so elevation
+    // became free.
+    const easing = 1 - clamp01(workload * 1.8);
+    const refill = lerp(READY_REFILL_SWIM, READY_REFILL_STILL, rest) * easing
+      * lerp(0.85, 1.15, a01(this.player.attr.effortRecovery));
+    const drain = workload * 0.16;
     this.burst = clamp01(this.burst + (refill - drain) * dt);
-    this.burst = Math.min(this.burst, this.pool * 1.05);
 
     // Possession-level pool: slower both ways.
     const poolDrain = workload * 0.085;

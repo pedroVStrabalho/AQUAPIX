@@ -64,8 +64,11 @@ function nudge(ctx, actions, frames = 45, athlete = null) {
   input.down.clear();
   for (const a of actions) input.down.add(a);
   for (let i = 0; i < frames; i++) frame(1 / 60);
+  // Settled heading matters as much as raw displacement: an athlete asked to
+  // reverse has to turn first, so the path out includes the turn arc.
+  const vx = me.vel.x, vz = me.vel.z;
   input.down.clear();
-  return { dx: me.pos.x - from.x, dz: me.pos.z - from.z, me };
+  return { dx: me.pos.x - from.x, dz: me.pos.z - from.z, vx, vz, me };
 }
 
 test('pressing a direction moves your athlete, and the opposite key reverses it', () => {
@@ -85,9 +88,11 @@ test('pressing a direction moves your athlete, and the opposite key reverses it'
     assert.ok(magA > 0.4, `holding ${a} moves the athlete (${magA.toFixed(2)}m)`);
     assert.ok(magB > 0.4, `holding ${b} moves the athlete (${magB.toFixed(2)}m)`);
 
-    // Opposed directions: the dot product of the two displacements is negative.
-    const dot = (first.dx * second.dx + first.dz * second.dz) / (magA * magB);
-    assert.ok(dot < -0.4, `${a} and ${b} move in opposite directions (dot ${dot.toFixed(2)})`);
+    // Opposed directions, measured on the settled swimming direction.
+    const sa = Math.hypot(first.vx, first.vz) || 1;
+    const sb = Math.hypot(second.vx, second.vz) || 1;
+    const dot = (first.vx * second.vx + first.vz * second.vz) / (sa * sb);
+    assert.ok(dot < -0.4, `${a} and ${b} swim in opposite directions (dot ${dot.toFixed(2)})`);
   }
 });
 
