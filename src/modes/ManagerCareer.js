@@ -13,13 +13,14 @@
  */
 
 import { Rng, clamp, clamp01, lerp } from '../core/Math2.js';
-import { TEAMS, defaultLineup } from '../data/Teams.js';
+import { TEAMS, defaultLineup, distanceKm } from '../data/Teams.js';
 import { overallFor, POSITION_NAMES, TRAIT_BY_ID, OVERALL_WEIGHTS, POSITIONS } from '../data/Attributes.js';
 import { starRating, starString } from '../data/DisplayStats.js';
 import { registerScreen, shell, menuItem, chipRow, field, el } from '../ui/Screens.js';
 import { simulateByStars } from './SimResult.js';
 import { OFFENSIVE_SYSTEMS, DEFENSIVE_SYSTEMS, EXTRA_PLAYER_SYSTEMS, MAN_DOWN_SYSTEMS, TACTICAL_TRIGGERS } from '../ai/Tactics.js';
 import { humanise } from '../ui/HUD.js';
+import { computeMatchEarnings, applyEarnings, newWallet, computeWeeklyOperations, GAME_ECONOMY_CONFIG } from './Economy.js';
 
 export const TRAINING_FOCUS = {
   swimming: { name: 'Swimming and Conditioning', attrs: ['swimSpeed', 'firstStroke', 'endurance', 'burstStamina', 'recoverySpeed'], fatigue: 1.25 },
@@ -84,7 +85,30 @@ export class ManagerCareer {
       confidence: 0.6,
       budget: Math.round(club.prestige * 1800),
     };
+    // Progression wallet. `board.budget` remains the single source of truth for
+    // money - the wallet mirrors it - so every existing transfer and market
+    // check keeps working untouched.
+    this.wallet = newWallet(club);
+    this.lastEarnings = null;
+    this.lastOperations = null;
+    this.weeksInDebt = 0;
+    this.sacked = false;
+    this._bindWalletMoney();
     this.pushNews(`You have been appointed at ${club.name}. The board expects ${this.expectationText()}.`);
+  }
+
+  /**
+   * Make `wallet.money` a live view of `board.budget` rather than a copy.
+   * Transfers, board grants and event outcomes all mutate `board.budget`
+   * directly; a mirrored number would silently drift out of step with them.
+   */
+  _bindWalletMoney() {
+    Object.defineProperty(this.wallet, 'money', {
+      get: () => this.board.budget,
+      set: (v) => { this.board.budget = Math.round(v); },
+      configurable: true,
+      enumerable: true,
+    });
   }
 
   get club() { return TEAMS.find((t) => t.id === this.clubId); }
@@ -152,6 +176,7 @@ export class ManagerCareer {
       this.applyResult(fx, result);
     }
     this.applyTrainingWeek();
+    this._applyWeeklyOperations();
     this._maybeGenerateDecision();
     this.round++;
     if (this.round >= this.fixtures.length) this.endSeason();
@@ -180,15 +205,52 @@ export class ManagerCareer {
     else if (res.home < res.away) { a.won++; h.lost++; a.pts += 3; }
     else { h.drawn++; a.drawn++; h.pts++; a.pts++; }
 
-    this.results.push({ round: this.round, ...fx, ...res });
+    // Store the result with UNAMBIGUOUS field names. Spreading `fx` (whose
+    // `home`/`away` are team ids) and then `res` (whose `home`/`away` are goal
+    // counts) silently overwrote the ids with the scores, so the league table
+    // looked up TEAMS by the number 3 and crashed on undefined.
+    this.results.push({
+      round: this.round,
+      homeId: fx.home, awayId: fx.away,
+      homeGoals: res.home, awayGoals: res.away,
+      simulated: !!res.simulated, upset: !!res.upset,
+    });
 
     if (fx.home === this.clubId || fx.away === this.clubId) {
       const us = fx.home === this.clubId ? res.home : res.away;
       const them = fx.home === this.clubId ? res.away : res.home;
-      const opp = TEAMS.find((t) => t.id === (fx.home === this.clubId ? fx.away : fx.home));
+      const oppId = fx.home === this.clubId ? fx.away : fx.home;
+      // Never dereference a club lookup bare: an unknown id here would take the
+      // whole career screen down with it, which is exactly how the league table
+      // came to render blank.
+      const opp = TEAMS.find((t) => t.id === oppId) ?? { name: 'Unknown', prestige: 0 };
       const verdict = us > them ? 'Win' : us < them ? 'Defeat' : 'Draw';
       this.pushNews(`${verdict} ${us}-${them} against ${opp.name}.`);
       this.board.confidence = clamp01(this.board.confidence + (us > them ? 0.07 : us < them ? -0.06 : 0));
+
+      // --- Progression: XP, supporters and gate money -------------------
+      // Earned purely by playing. Nothing here is gated behind anything the
+      // player has to watch or buy.
+      if (us > them) {
+        this.wallet.streak++;
+        this.wallet.bestStreak = Math.max(this.wallet.bestStreak, this.wallet.streak);
+      } else {
+        this.wallet.streak = 0;
+      }
+      const earned = computeMatchEarnings({
+        scored: us,
+        conceded: them,
+        home: fx.home === this.clubId,
+        fans: this.wallet.fans,
+        streak: this.wallet.streak,
+        upset: opp.prestige > this.club.prestige + 2 && us > them,
+        squadStars: this.teamStarAvg(),
+      });
+      const applied = applyEarnings(this.wallet, earned);
+      this.lastEarnings = { ...earned, opponent: opp.name, us, them,
+        levelledUp: applied.levelledUp, level: this.wallet.level };
+      if (applied.levelledUp) this.pushNews(`You reached manager level ${this.wallet.level}.`);
+      if (this.wallet.streak >= 3) this.pushNews(`${this.wallet.streak} wins in a row - the city is buzzing.`);
 
       // Match load on the athletes who played.
       for (const p of defaultLineup(this.squad)) {
@@ -200,6 +262,52 @@ export class ManagerCareer {
           this.pushNews(`${p.name} picked up a shoulder problem and misses ${s.injuryWeeks} week(s).`);
         }
       }
+    }
+  }
+
+  /**
+   * Charge a week of running the club, and take the gate.
+   *
+   * This runs every round whether you played or simmed: a club spends money on
+   * ordinary days too. Sustained debt costs board confidence and eventually the
+   * job, which is what makes the wage bill a real constraint on squad building.
+   */
+  _applyWeeklyOperations() {
+    const fx = this.userFixture();
+    const home = fx ? fx.home === this.clubId : true;
+    const oppId = fx ? (home ? fx.away : fx.home) : null;
+    const opp = oppId ? TEAMS.find((t) => t.id === oppId) : null;
+
+    const ops = computeWeeklyOperations({
+      squad: this.squad,
+      squadStars: this.teamStarAvg(),
+      home,
+      distanceKm: home || !opp ? 0 : distanceKm(this.club, opp),
+      fans: this.wallet.fans,
+      capacity: this.club.capacity ?? 3500,
+      streak: this.wallet.streak,
+    });
+
+    this.board.budget += ops.net;
+    this.lastOperations = { ...ops, home, opponent: opp?.name ?? null,
+      distanceKm: home || !opp ? 0 : distanceKm(this.club, opp) };
+
+    // --- Debt, board patience, and the sack -------------------------------
+    const limit = GAME_ECONOMY_CONFIG.debt.weeksBeforeSack;
+    if (this.board.budget < 0) {
+      this.weeksInDebt++;
+      this.board.confidence = clamp01(
+        this.board.confidence - GAME_ECONOMY_CONFIG.debt.confidencePerWeek);
+      this.pushNews(
+        `The club is $${Math.abs(this.board.budget).toLocaleString()} in debt ` +
+        `(week ${this.weeksInDebt} of ${limit}). Sell players or start winning.`);
+      if (this.weeksInDebt >= limit) {
+        this.sacked = true;
+        this.pushNews('The board has terminated your contract over the club\'s finances.');
+      }
+    } else if (this.weeksInDebt > 0) {
+      this.weeksInDebt = 0;
+      this.pushNews('The accounts are back in the black. The board is satisfied.');
     }
   }
 
@@ -464,6 +572,14 @@ export class ManagerCareer {
       freeAgents: this.freeAgents,
       squadMorale: this.squadMorale, academyIntake: this.academyIntake,
       market: this.market, pendingDecisions: this.pendingDecisions, transferBudgetUsed: this.transferBudgetUsed,
+      // `money` is a live view of board.budget, so it is deliberately not
+      // serialised separately - the budget in `board` already carries it.
+      wallet: {
+        xp: this.wallet.xp, level: this.wallet.level,
+        xpIntoLevel: this.wallet.xpIntoLevel, xpForNext: this.wallet.xpForNext,
+        fans: this.wallet.fans, streak: this.wallet.streak, bestStreak: this.wallet.bestStreak,
+      },
+      weeksInDebt: this.weeksInDebt, sacked: this.sacked,
     };
   }
 
@@ -477,6 +593,12 @@ export class ManagerCareer {
       market: data.market ?? c.market, pendingDecisions: data.pendingDecisions ?? [],
       transferBudgetUsed: data.transferBudgetUsed ?? 0,
     });
+    // Older saves predate the progression wallet: start one from the club's
+    // standing rather than refusing to load.
+    if (data.wallet) Object.assign(c.wallet, data.wallet);
+    c.weeksInDebt = data.weeksInDebt ?? 0;
+    c.sacked = data.sacked ?? false;
+    c._bindWalletMoney();
     if (data.rosters) league.rosters = data.rosters;
     return c;
   }
@@ -539,7 +661,7 @@ registerScreen('careerSetup', (game, params, mgr) => shell('Coach Career', (body
     resume.appendChild(menuItem(
       'Continue Saved Career',
       `${TEAMS.find((t) => t.id === saved.clubId)?.name} · season ${saved.season}, round ${saved.round + 1}`,
-      'Saved', () => game.resumeCareer(saved)));
+      null, () => game.resumeCareer(saved)));
     body.appendChild(resume);
   }
 
@@ -595,7 +717,130 @@ registerScreen('careerHub', (game, params, mgr) => shell('Career', (body) => {
   addI('SQUAD MORALE', Math.round(c.squadMorale ?? 72), (c.squadMorale ?? 72) > 55 ? '#5ef08a' : '#ffcf4d');
   addI('TRANSFER BUDGET', '$' + (c.board.budget));
   head.appendChild(teamInfo);
+
+  // ---- Progression: level, XP, supporters, money -------------------------
+  const w = c.wallet;
+  if (w) {
+    const prog = el('div', 'tc-stats');
+    prog.style.marginTop = '10px';
+    const addP = (label, val, color) => {
+      const d = el('div', 'tc-stat'); const b = el('b', null, val);
+      if (color) b.style.color = color;
+      d.appendChild(b); d.appendChild(document.createTextNode(label)); prog.appendChild(d);
+    };
+    addP('LEVEL', String(w.level), '#8ad7ff');
+    addP('XP', `${w.xpIntoLevel}/${w.xpForNext}`, '#8ad7ff');
+    addP('FANS', w.fans.toLocaleString(), '#f4c430');
+    addP('MONEY', '$' + w.money.toLocaleString(), '#5ef08a');
+    if (w.streak > 0) addP('WIN STREAK', String(w.streak), '#ff9f4d');
+    head.appendChild(prog);
+
+    // XP progress bar toward the next level.
+    const xb = el('div', 'pcb');
+    xb.style.marginTop = '10px';
+    xb.style.gridTemplateColumns = '140px 1fr';
+    xb.appendChild(el('span', 'pcb-l', `To level ${w.level + 1}`));
+    const xbar = el('div', 'pcb-bar');
+    const xfill = el('i');
+    xfill.style.width = `${w.xpForNext ? (w.xpIntoLevel / w.xpForNext) * 100 : 100}%`;
+    xfill.style.background = '#8ad7ff';
+    xbar.appendChild(xfill);
+    xb.appendChild(xbar);
+    head.appendChild(xb);
+  }
   body.appendChild(head);
+
+  // ---- The week's ledger --------------------------------------------------
+  if (c.lastOperations) {
+    const o = c.lastOperations;
+    const fc = el('div', 'card');
+    fc.style.marginTop = '14px';
+    fc.style.borderLeft = `4px solid ${o.net >= 0 ? '#5ef08a' : '#f87171'}`;
+    fc.appendChild(el('h3', null,
+      `Week ${Math.max(1, c.round)} operating costs \u00b7 ${o.days} days` +
+      (o.home ? ' \u00b7 home fixture'
+              : ` \u00b7 away at ${o.opponent ?? 'unknown'} (${o.distanceKm} km)`)));
+
+    for (const ln of o.lines) {
+      const row = el('div', 'tc-city');
+      row.style.display = 'flex';
+      row.style.justifyContent = 'space-between';
+      row.style.gap = '12px';
+      const left = el('span', null, ln.detail ? `${ln.label} \u2014 ${ln.detail}` : ln.label);
+      const right = el('b', null,
+        `${ln.money >= 0 ? '+' : '-'}$${Math.abs(ln.money).toLocaleString()}`);
+      right.style.color = ln.money >= 0 ? '#5ef08a' : '#f87171';
+      right.style.whiteSpace = 'nowrap';
+      row.appendChild(left); row.appendChild(right);
+      fc.appendChild(row);
+    }
+
+    const tot = el('div', 'tc-stats');
+    tot.style.marginTop = '8px';
+    const addF = (label, val, color) => {
+      const d = el('div', 'tc-stat'); const b = el('b', null, val);
+      if (color) b.style.color = color;
+      d.appendChild(b); d.appendChild(document.createTextNode(label)); tot.appendChild(d);
+    };
+    addF('OUTGOINGS', `-$${o.costs.toLocaleString()}`, '#f87171');
+    addF('INCOME', `+$${o.income.toLocaleString()}`, '#5ef08a');
+    addF('WEEK NET', `${o.net >= 0 ? '+' : '-'}$${Math.abs(o.net).toLocaleString()}`,
+      o.net >= 0 ? '#5ef08a' : '#f87171');
+    if (o.attendance) addF('ATTENDANCE', o.attendance.toLocaleString(), '#8ad7ff');
+    fc.appendChild(tot);
+    body.appendChild(fc);
+  }
+
+  // ---- Board warning: the club is in the red ------------------------------
+  if (c.board.budget < 0) {
+    const warn = el('div', 'card');
+    warn.style.marginTop = '14px';
+    warn.style.borderLeft = '4px solid #f87171';
+    warn.appendChild(el('h3', null, 'The board is watching the accounts'));
+    warn.appendChild(el('p', null,
+      `You are $${Math.abs(c.board.budget).toLocaleString()} in debt. ` +
+      `Week ${c.weeksInDebt} of ${GAME_ECONOMY_CONFIG.debt.weeksBeforeSack} \u2014 ` +
+      'sell players, cut the wage bill, or start winning.'));
+    body.appendChild(warn);
+  }
+
+  // ---- What the last match paid ------------------------------------------
+  if (c.lastEarnings) {
+    const e = c.lastEarnings;
+    const ec = el('div', 'card');
+    ec.style.marginTop = '14px';
+    ec.style.borderLeft = `4px solid ${e.result === 'win' ? '#5ef08a' : e.result === 'draw' ? '#ffcf4d' : '#f87171'}`;
+    ec.appendChild(el('h3', null,
+      `Last match earnings - ${e.us}-${e.them} v ${e.opponent}`));
+    for (const ln of e.lines) {
+      const row = el('div', 'tc-city');
+      const bits = [];
+      if (ln.xp) bits.push(`${ln.xp > 0 ? '+' : ''}${ln.xp} XP`);
+      if (ln.fans) bits.push(`${ln.fans > 0 ? '+' : ''}${ln.fans.toLocaleString()} fans`);
+      if (ln.money) bits.push(`${ln.money > 0 ? '+' : '-'}$${Math.abs(ln.money).toLocaleString()}`);
+      row.textContent = `${ln.label} - ${bits.join(', ')}`;
+      ec.appendChild(row);
+    }
+    const total = el('div', 'tc-stats');
+    total.style.marginTop = '8px';
+    const addT = (label, val, color) => {
+      const d = el('div', 'tc-stat'); const b = el('b', null, val);
+      if (color) b.style.color = color;
+      d.appendChild(b); d.appendChild(document.createTextNode(label)); total.appendChild(d);
+    };
+    addT('TOTAL XP', `+${e.xp}`, '#8ad7ff');
+    addT('TOTAL FANS', `${e.fans >= 0 ? '+' : ''}${e.fans.toLocaleString()}`, '#f4c430');
+    addT('TOTAL MONEY', `${e.money >= 0 ? '+' : '-'}$${Math.abs(e.money).toLocaleString()}`,
+      e.money >= 0 ? '#5ef08a' : '#f87171');
+    if (e.multiplier > 1) addT('STREAK BONUS', `x${e.multiplier.toFixed(2)}`, '#ff9f4d');
+    ec.appendChild(total);
+    if (e.levelledUp) {
+      const lu = el('div', 'tc-city', `Level up - you are now level ${e.level}.`);
+      lu.style.color = '#8ad7ff';
+      ec.appendChild(lu);
+    }
+    body.appendChild(ec);
+  }
 
   // Pending coach decision.
   if (c.pendingDecisions && c.pendingDecisions.length) {
@@ -628,8 +873,9 @@ registerScreen('careerHub', (game, params, mgr) => shell('Career', (body) => {
     btn.addEventListener('click', () => { c.startNextSeason(); game.saveCareer(); mgr.show('careerHub'); });
     next.appendChild(btn);
   } else if (fx) {
-    const home = TEAMS.find((t) => t.id === fx.home);
-    const away = TEAMS.find((t) => t.id === fx.away);
+    const unknown = { short: '???', name: 'Unknown club' };
+    const home = TEAMS.find((t) => t.id === fx.home) ?? unknown;
+    const away = TEAMS.find((t) => t.id === fx.away) ?? unknown;
     const line = el('div', 'tc-name', `${home.short}  v  ${away.short}`);
     next.appendChild(line);
     next.appendChild(el('div', 'tc-city', `${fx.home === c.clubId ? 'Home' : 'Away'} · ${home.name} v ${away.name}`));
@@ -812,7 +1058,7 @@ registerScreen('careerTable', (game, params, mgr) => shell('League', (body) => {
     const tr = el('tr');
     if (row.id === c.clubId) tr.className = 'row-hi';
     tr.appendChild(el('td', 'num', String(i + 1)));
-    tr.appendChild(el('td', null, team.name));
+    tr.appendChild(el('td', null, team?.name ?? row.id));
     for (const v of [row.played, row.won, row.drawn, row.lost, row.gf, row.ga, row.gf - row.ga, row.pts]) {
       tr.appendChild(el('td', 'num', String(v)));
     }
@@ -831,7 +1077,7 @@ registerScreen('careerTable', (game, params, mgr) => shell('League', (body) => {
     fixCard.appendChild(el('h3', null, `Round ${c.round + 1} fixtures`));
     for (const f of rd) {
       const p = el('p', null,
-        `${TEAMS.find((t) => t.id === f.home).name}  v  ${TEAMS.find((t) => t.id === f.away).name}`);
+        `${TEAMS.find((t) => t.id === f.home)?.name ?? '?'}  v  ${TEAMS.find((t) => t.id === f.away)?.name ?? '?'}`);
       p.style.margin = '0 0 5px';
       fixCard.appendChild(p);
     }
@@ -843,8 +1089,15 @@ registerScreen('careerTable', (game, params, mgr) => shell('League', (body) => {
     res.style.marginTop = '14px';
     res.appendChild(el('h3', null, 'Recent results'));
     for (const r of c.results.slice(-8).reverse()) {
+      // Tolerate results saved by older builds, which used the ambiguous shape.
+      const homeId = r.homeId ?? (typeof r.home === 'string' ? r.home : null);
+      const awayId = r.awayId ?? (typeof r.away === 'string' ? r.away : null);
+      const hg = r.homeGoals ?? (typeof r.home === 'number' ? r.home : '?');
+      const ag = r.awayGoals ?? (typeof r.away === 'number' ? r.away : '?');
+      const hs = TEAMS.find((t) => t.id === homeId)?.short ?? '???';
+      const as = TEAMS.find((t) => t.id === awayId)?.short ?? '???';
       const p = el('p', null,
-        `R${r.round + 1}  ${TEAMS.find((t) => t.id === r.home).short} ${r.home_score ?? r.home} - ${r.away_score ?? r.away} ${TEAMS.find((t) => t.id === r.away).short}${r.simulated ? '  (model)' : '  (played)'}`);
+        `R${r.round + 1}  ${hs} ${hg} - ${ag} ${as}${r.simulated ? '  (model)' : '  (played)'}`);
       p.style.margin = '0 0 4px';
       p.style.fontFamily = 'var(--mono)';
       res.appendChild(p);

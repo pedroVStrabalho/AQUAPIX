@@ -80,6 +80,8 @@ export class Ball {
     this.lastTouchSide = this.lastHolder?.side ?? this.lastTouchSide;
     this.holder = null;
     this.timeSinceLoose = 0;
+    this.saveAttempted = false;   // one save attempt per shot, not one per frame
+    this.blockTriedBy = new Set();// one block attempt per defender per shot
     this.kind = kind;
     this._skipped = false;
     this.travelledFrom = { ...from };

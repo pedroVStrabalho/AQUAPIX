@@ -231,23 +231,28 @@ export function resolveCatch(receiver, ball, rng, opts = {}) {
 
   // Elite athletes catch almost everything that is thrown at them properly; the
   // interesting failures come from pressure, speed, reach and the weak side.
-  let p = 0.62 + 0.34 * factors.catchSkill;
+  let p = 0.72 + 0.26 * factors.catchSkill;
   p *= lerp(0.70, 1.0, factors.facing);
   p *= lerp(0.82, 1.0, factors.freshness);
   p *= 1 - factors.pressure * 0.38;
   p *= 1 - factors.weakSide;
   p *= lerp(1.0, 0.80, clamp01((relSpeed - 13) / 10));  // a driven pass is harder
-  p *= lerp(1.0, 0.70, clamp01((gap - 0.45) / 0.85));   // reach catches are harder
+  p *= lerp(1.0, 0.78, clamp01((gap - 0.55) / 0.95));   // reach catches are harder
   if (factors.wetCatch) p *= lerp(0.84, 1.0, a01(attr.wetPassControl));
   if (receiver.hasBall) p = 1;
   p = clamp01(p);
 
   const roll = rng.next();
   let outcome;
+  // The ways a catch can FAIL scale with how hard the catch was. Fixed-width
+  // failure bands meant a wide-open receiver still dropped one pass in five,
+  // which made dropped passes the single largest source of turnovers in the
+  // match - two thirds of them. A free player in clear water keeps the ball.
+  const fail = 1 - p;
   if (roll < p * 0.70) outcome = factors.wetCatch ? 'wetCollection' : (gap > 0.55 ? 'reachCatch' : 'clean');
   else if (roll < p) outcome = factors.elevation > 0.5 ? 'highCatch' : 'delayedControl';
-  else if (roll < p + 0.12) outcome = 'bobble';
-  else if (roll < p + 0.19) outcome = 'deflection';
+  else if (roll < p + fail * 0.45) outcome = 'bobble';
+  else if (roll < p + fail * 0.65) outcome = 'deflection';
   else outcome = 'drop';
 
   // A delayed control is still a catch - the athlete simply needs an extra beat
@@ -359,13 +364,18 @@ export function resolveShot(shooter, aimPoint, opts) {
   // Perfect release timing produces the best version of the shot this athlete can
   // physically execute (section 14.4) - it never guarantees a goal.
   const timingBonus = lerp(0.55, 1.0, smoothstep(timing));
-  let errRad = lerp(0.165, 0.0165, factors.placement * 0.55 + factors.technique * 0.45)
+  // These are ANGULAR errors, and they compound. At the old figures an average
+  // shooter's spread reached ~19 degrees, which at six metres is a two metre
+  // miss against a goal three metres wide and only 0.9 m high - so roughly two
+  // thirds of all shots missed the target entirely and scoring was throttled by
+  // accuracy rather than by goalkeeping.
+  let errRad = lerp(0.045, 0.007, factors.placement * 0.55 + factors.technique * 0.45)
     / timingBonus
-    * lerp(1.85, 1.0, factors.shoulder)
-    * lerp(1.7, 1.0, factors.freshness)
-    * (1 + factors.pressure * (1.35 - 0.7 * factors.underContact))
-    * (1 + weakHand * 2.4)
-    * lerp(1.28, 0.9, factors.elevation);
+    * lerp(1.18, 1.0, factors.shoulder)
+    * lerp(1.35, 1.0, factors.freshness)
+    * (1 + factors.pressure * (0.45 - 0.25 * factors.underContact))
+    * (1 + weakHand * 1.9)
+    * lerp(1.18, 0.92, factors.elevation);
 
   if (shooter.has('lateClock') && opts.shotClock != null && opts.shotClock < 5) {
     factors.lateClock = 1;
@@ -399,7 +409,7 @@ export function resolveShot(shooter, aimPoint, opts) {
     spin.z = -Math.sin(yaw) * topspin;
     vy += rng.gauss(0, 0.42 * (1.3 - a01(attr.skipControl)));
   } else {
-    vy = (aimPoint.y - from.y) / t + 0.5 * 9.81 * t + rng.gauss(0, errRad * 5.5);
+    vy = (aimPoint.y - from.y) / t + 0.5 * 9.81 * t + rng.gauss(0, errRad * 3.2);
     spin.x = Math.cos(yaw) * -12;
     spin.z = -Math.sin(yaw) * -12;
     spin.y = rng.gauss(0, 5);
@@ -427,29 +437,39 @@ export function shotQuality({ distance, angle, goalkeeper, shooter, factors, pro
   // from twelve metres is not "a slightly worse six metre shot" - it is a
   // different proposition entirely, and no amount of open water redeems it.
   // Roughly: 2 m -> 0.95, 5 m -> 0.62, 7 m -> 0.41, 9 m -> 0.24, 12 m -> 0.09.
-  const distTerm = Math.exp(-Math.pow(Math.max(0, distance - 1.0) / 5.6, 1.6));
+  const distTerm = Math.exp(-Math.pow(Math.max(0, distance - 1.0) / 6.4, 1.6));
 
   // Angle: shooting from the wing is genuinely harder.
   const angleTerm = Math.pow(clamp01(1 - angle / 1.3), 0.8);
 
   // Goalkeeper: how much goal they are actually leaving open.
+  // A correctly positioned keeper is beatable: the goal is three metres wide and
+  // they are one person. This used to fall to nearly zero whenever the keeper sat
+  // on their line and on the angle - which, once the keeper AI was fixed, was
+  // ALWAYS - so the shot heuristic concluded no shot was ever worth taking and
+  // the AI simply stopped shooting. The floor is what a shooter can still see
+  // past a perfect keeper.
   let gkTerm = 0.5;
   if (goalkeeper) {
     const gz = f ? Math.sign(goalkeeper.pos.z) * f.length / 2 : goalkeeper.pos.z;
     const off = Math.abs(goalkeeper.pos.x - shooter.pos.x * 0.35);
     const depth = clamp01((Math.abs(gz - goalkeeper.pos.z) - 0.2) / 1.5);
-    gkTerm = clamp01(clamp01(off / 1.6) * 0.55 + depth * 0.45);
+    gkTerm = clamp01(0.34 + clamp01(off / 1.6) * 0.42 + depth * 0.3);
   }
 
-  const execution = 0.68 + 0.32 * (
+  const execution = 0.80 + 0.20 * (
     0.45 * factors.elevation + 0.35 * factors.shoulder + 0.20 * factors.freshness
   );
 
+  // Each of these penalties is reasonable alone, but they MULTIPLY: five modest
+  // discounts stacked turned a good six metre shot into a 0.09. The floors keep
+  // the combination survivable, so this stays on its documented scale of
+  // "roughly the probability this ends in a goal".
   const q = distTerm
-    * lerp(0.45, 1.0, angleTerm)
-    * lerp(0.55, 1.0, gkTerm)
-    * (1 - 0.55 * factors.pressure)
-    * lerp(0.4, 1.0, clamp01(factors.blockOpen))
+    * lerp(0.72, 1.0, angleTerm)
+    * lerp(0.70, 1.0, gkTerm)
+    * (1 - 0.35 * factors.pressure)
+    * lerp(0.68, 1.0, clamp01(factors.blockOpen))
     * execution;
 
   return clamp01(q);

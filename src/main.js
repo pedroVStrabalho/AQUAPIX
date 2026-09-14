@@ -39,7 +39,7 @@ class Game {
     };
 
     this.matchConfig = {
-      homeId: 'tidal', awayId: 'kraken', profileId: 'quick-4',
+      homeId: 'tidal', awayId: 'kraken', profileId: 'arcade',
       difficulty: 'national', assist: ASSIST_PROFILE.STANDARD,
       refereeProfile: 'standard', userSide: 'home',
     };
@@ -81,7 +81,7 @@ class Game {
   startTraining(drill) {
     const cfg = this.matchConfig;
     this._launchMatch({
-      league: this.league, profile: getProfile('quick-2'),
+      league: this.league, profile: getProfile('arcade'),
       homeId: cfg.homeId ?? 'tidal', awayId: cfg.awayId ?? 'kraken',
       difficulty: 'club', assist: ASSIST_PROFILE.BEGINNER, refereeProfile: 'standard',
       userSide: 'home', drill, onEnd: () => this.showFullTime('training'),
@@ -91,7 +91,7 @@ class Game {
   playCareerMatch(fixture) {
     const userIsHome = fixture.home === this.career.clubId;
     this._launchMatch({
-      league: this.league, profile: getProfile('quick-6'),
+      league: this.league, profile: getProfile('arcade'),
       homeId: fixture.home, awayId: fixture.away,
       difficulty: this.matchConfig.difficulty, assist: this.matchConfig.assist,
       refereeProfile: 'standard', userSide: userIsHome ? 'home' : 'away',
@@ -236,7 +236,7 @@ class Game {
     if (!fx) { this._afterPlayerWeek(null); return; }
     const userIsHome = fx.home === c.clubId;
     this._launchMatch({
-      league: this.playerLeague, profile: getProfile('quick-4'),
+      league: this.playerLeague, profile: getProfile('arcade'),
       homeId: fx.home, awayId: fx.away,
       difficulty: this.matchConfig.difficulty, assist: this.matchConfig.assist,
       refereeProfile: 'standard', userSide: userIsHome ? 'home' : 'away',

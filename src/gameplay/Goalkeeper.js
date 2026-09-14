@@ -74,6 +74,31 @@ export class GoalkeeperBrain {
     }
     this.outletDelay = null;
 
+    // --- Smother a loose ball in my own goal mouth -------------------------
+    // A keeper does not watch a free ball roll across their own line. Without
+    // this, balls that nobody is chasing simply drift into an unattended net -
+    // goals that belong to no shooter and to no attack.
+    if (ball.isLoose && !ball.holder) {
+      const toLine = Math.abs(ball.pos.z - gz);
+      const wide = Math.abs(ball.pos.x);
+      // Generous: a slow ball anywhere in the goal area is the keeper's to claim.
+      // Measured, more than half of all goals were balls drifting over the line
+      // at 1.5 m/s with no shot within the previous ten seconds.
+      // Only a genuinely slow ball. A keeper who swims at an incoming SHOT has
+      // abandoned their angle, and every shot then goes in behind them - so
+      // anything with pace is left to the save logic below.
+      if (ball.speed < 4.5 && toLine < 6.0 && wide < half + 4.5) {
+        const to = new Vec2(ball.pos.x - gk.pos.x, ball.pos.z - gk.pos.z);
+        const d = to.length();
+        cmd.dir = d > 0.1 ? to.normalize() : null;
+        cmd.arriveDist = d;
+        cmd.effort = 1;
+        cmd.rise = 0.5;
+        cmd.face = Math.atan2(ball.pos.x - gk.pos.x, ball.pos.z - gk.pos.z);
+        return cmd;
+      }
+    }
+
     // --- Where is the threat? ---------------------------------------------
     const threat = ball.holder ?? (ball.isLoose ? { pos: { x: ball.pos.x, z: ball.pos.z }, isBall: true } : null);
     const tx = threat ? threat.pos.x : ball.pos.x;
@@ -116,6 +141,18 @@ export class GoalkeeperBrain {
         };
       }
 
+      // Keep TRACKING the ball rather than freezing on the first read. A shot
+      // that is in the air for most of a second gives the keeper time to correct
+      // - that is precisely why long shots are saveable and close ones are not.
+      // Committing once and never refining left the keeper standing in the wrong
+      // place on exactly the shots they should comfortably reach.
+      if (this.committed && incoming) {
+        const track = lerp(1.2, 4.5, a01(attr.skipTracking)) * diff.gkDiscipline;
+        const k = 1 - Math.exp(-track * dt);
+        this.committed.x += (incoming.x - this.committed.x) * k;
+        this.committed.y += (incoming.y - this.committed.y) * k;
+      }
+
       if (this.committed) {
         targetX = clamp(this.committed.x, -half - 0.55, half + 0.55);
         targetZ = gz + this.gk.attackDir * clamp(depth, 0.18, 0.6);
@@ -142,6 +179,7 @@ export class GoalkeeperBrain {
     const to = new Vec2(targetX - gk.pos.x, targetZ - gk.pos.z);
     const d = to.length();
     cmd.dir = d > 0.08 ? to.normalize() : null;
+    cmd.arriveDist = d;   // settle on the angle, don't sail past it
     cmd.effort = Math.max(cmd.effort, clamp01(d / 1.2) * lerp(0.6, 1.0, a01(attr.lateralMovement)));
     cmd.face = Math.atan2(tx - gk.pos.x, tz - gk.pos.z);
     cmd.brace = true;
@@ -219,14 +257,20 @@ export function attemptSave(gk, ball, brain, rng, opts = {}) {
   // Reach envelope.
   const armSpan = gk.reach * lerp(1.5, 2.05, a01(attr.singleArmReach)) * (1 + gk.elevation * 0.35);
   const vertical = gk.reach * lerp(1.0, 1.5, a01(attr.twoArmCoverage)) * (1 + gk.elevation * 0.9);
-  const depthReach = 0.55 + gk.elevation * 0.3;
+  const depthReach = 0.95 + gk.elevation * 0.45;
 
   // Manual input steers the block; assisted keepers use their committed read.
+  // The committed read is only worth something if there was TIME to read. On a
+  // close-range shot the ball arrives before the keeper can move, so handing
+  // them the full read-assist let them cover the corner the shooter had picked -
+  // which is why accurate close shooting was being punished instead of rewarded.
+  // Long shots keep the full assist, so half-court stays comfortably read.
+  const readAssist = clamp01(((ball.timeSinceLoose ?? 0) - 0.14) / 0.40);
   let biasX = 0, biasY = 0;
   if (manual) { biasX = manual.x * 0.55; biasY = manual.y * 0.4; }
   else if (brain?.committed) {
-    biasX = clamp((brain.committed.x - hx) * 0.6, -0.6, 0.6);
-    biasY = clamp((brain.committed.y - hy) * 0.5, -0.4, 0.5);
+    biasX = clamp((brain.committed.x - hx) * 0.6, -0.6, 0.6) * readAssist;
+    biasY = clamp((brain.committed.y - hy) * 0.5, -0.4, 0.5) * readAssist;
   }
 
   const ex = (dx - biasX) / armSpan;
@@ -241,29 +285,56 @@ export function attemptSave(gk, ball, brain, rng, opts = {}) {
   const speedPenalty = clamp01(1 - (ball.speed - 12) / 22);
   const control = clamp01(clean * 0.6 + speedPenalty * 0.25 + a01(attr.closeRange) * closeRange * 0.25);
 
+  // Away from the goal line, unambiguously. The keeper defends the line at
+  // z = -attackDir * halfLength, so the pool - and safety - is in the opposite
+  // direction. Deriving this from the keeper-relative offset or from the ball's
+  // own velocity both get the sign wrong in some geometries, and a save that
+  // deflects into your own net is the worst outcome in the game.
+  const outward = gk.attackDir;
+
+  // ONE attempt per shot, decided the first time the ball is genuinely within
+  // reach. Rolling every frame made the outcome depend on how many frames the
+  // ball happened to spend inside the envelope - a frame-rate lottery - and let
+  // a keeper who had already been beaten save the same shot on the next tick.
+  if (ball.saveAttempted) return null;
+  ball.saveAttempted = true;
+
+  // How long has the keeper had to read it? A shot from twelve metres is in the
+  // air for most of a second: the keeper sees it, sets, and takes it. A shot
+  // from three metres arrives before they can move. Without this the chance was
+  // flat, and a HALF-COURT shot scored as often as a point-blank one.
+  const flight = ball.timeSinceLoose ?? 0;
+  const readiness = clamp01((flight - 0.20) / 0.42);
+  const saveChance = clamp01(lerp(0.20, 0.97, readiness) * lerp(0.85, 1.12, control));
+
   const roll = rng.next();
   let outcome, vel;
   const n = { x: (dx || 0.01), y: Math.max(0.15, dy), z: dz };
   const nl = Math.hypot(n.x, n.y, n.z) || 1;
   n.x /= nl; n.y /= nl; n.z /= nl;
 
-  if (roll < control * 0.62) {
+  if (roll < saveChance * 0.55) {
     outcome = 'controlled';   // keeper holds it
     vel = { x: 0, y: 0, z: 0 };
-  } else if (roll < control + 0.22) {
+  } else if (roll < saveChance * 0.85) {
     outcome = 'parry';        // directed deflection
     const speed = ball.speed * lerp(0.22, 0.42, 1 - control);
     // A controlled keeper parries wide and away from the danger zone.
     const wide = Math.sign(dx || rng.range(-1, 1));
     const dirX = lerp(n.x, wide, lerp(0.2, 0.85, a01(attr.reboundControl)));
-    vel = { x: dirX * speed, y: Math.abs(n.y) * speed * 0.8 + 1.5, z: -Math.sign(dz || 1) * speed * 0.7 };
-  } else if (roll < control + 0.34) {
-    outcome = 'deflection';   // uncontrolled: anywhere
+    vel = { x: dirX * speed, y: Math.abs(n.y) * speed * 0.8 + 1.5, z: outward * speed * 0.7 };
+  } else if (roll < saveChance) {
+    outcome = 'deflection';   // uncontrolled: anywhere, but never backwards
     const speed = ball.speed * 0.5;
+    // "Uncontrolled" means the keeper cannot choose WHERE it goes - not that it
+    // goes into their own goal. The outward z is forced: a hand on the ball
+    // always kills its momentum toward the line. Letting this component stay
+    // negative meant a large share of saves deflected straight into the net.
+    const out = outward;
     vel = {
       x: (n.x + rng.gauss(0, 0.6)) * speed,
       y: Math.abs(n.y) * speed * 0.6 + 1.2,
-      z: (n.z + rng.gauss(0, 0.5)) * speed,
+      z: out * Math.abs(n.z + rng.gauss(0, 0.5)) * speed,
     };
   } else {
     return null;              // beaten: the ball goes through

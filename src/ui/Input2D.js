@@ -153,7 +153,10 @@ export class Input2D {
       const v = new Vec2(wx, wz);
       v.normalize().scale(Math.min(1, mag));
       cmd.dir = v;
-      cmd.effort = this.isDown('sprint') || this.isDown('modifier') ? 1 : 0.66;
+      // Arcade: pushing a direction always swims at full effort. Sprint adds a
+      // real burst on top (handled in Athlete via cmd.sprint).
+      cmd.effort = 1;
+      cmd.sprint = this.isDown('sprint') || this.isDown('modifier');
     }
 
     const attacking = sim.possession === a.side;

@@ -615,3 +615,124 @@ table.data td.num, table.data th.num { text-align: right; font-family: var(--mon
   .mh-card { bottom: 130px; }
   .mh-controls { display: none; }
 }
+
+/* ===========================================================================
+   Main menu: play modes vs everything else.
+
+   The old menu listed eight identical rows, so "Settings" shouted as loudly as
+   "Coach Career" and the eye had nowhere to land. Playing the game is now
+   unmistakably the primary action: big, coloured, with its own art. The tools
+   and reference screens keep their place but stop competing for attention.
+   =========================================================================== */
+
+.play-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  max-width: 720px;
+  margin-top: 24px;
+}
+/* The three real modes lead; practice sits alongside at half height. */
+.play-card.is-lead { grid-column: span 1; }
+.play-card.is-wide { grid-column: 1 / -1; }
+
+.play-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  gap: 6px;
+  min-height: 148px;
+  padding: 18px 20px;
+  cursor: pointer;
+  text-align: left;
+  color: var(--ink);
+  font: inherit;
+  width: 100%;
+  border: 1px solid var(--edge);
+  border-bottom: 3px solid var(--accent, var(--spray));
+  background:
+    linear-gradient(150deg, rgba(6, 22, 32, 0.15) 0%, rgba(3, 10, 16, 0.88) 72%),
+    var(--wash, linear-gradient(135deg, #0b2432, #12384a));
+  overflow: hidden;
+  transition: transform 0.16s cubic-bezier(0.2, 0.9, 0.3, 1.1),
+              box-shadow 0.16s, border-bottom-width 0.16s;
+}
+.play-card:hover, .play-card:focus-visible {
+  transform: translateY(-4px);
+  border-bottom-width: 6px;
+  box-shadow: 0 10px 0 -4px rgba(3, 10, 16, 0.6), 0 0 28px -6px var(--accent, var(--spray));
+  outline: none;
+}
+.play-card.is-compact { min-height: 96px; }
+
+/* Oversized pixel glyph bled into the corner, clipped by the card. */
+.pc-glyph {
+  position: absolute;
+  right: -6px;
+  top: -14px;
+  font-size: 78px;
+  line-height: 1;
+  opacity: 0.22;
+  filter: saturate(0.6);
+  pointer-events: none;
+  user-select: none;
+}
+.play-card.is-compact .pc-glyph { font-size: 54px; top: -8px; }
+
+.pc-kicker {
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--accent, var(--spray));
+}
+.pc-title {
+  font-size: 21px;
+  font-weight: 800;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  line-height: 1.05;
+}
+.play-card.is-compact .pc-title { font-size: 16px; }
+.pc-desc {
+  font-size: 11.5px;
+  color: var(--muted);
+  line-height: 1.5;
+  max-width: 42ch;
+}
+
+/* Quiet row of tools and reference screens. */
+.util-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  max-width: 720px;
+  margin-top: 26px;
+  padding-top: 14px;
+  border-top: 1px solid var(--edge);
+}
+.util-link {
+  background: none;
+  border: 1px solid transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding: 7px 11px;
+  cursor: pointer;
+  transition: color 0.14s, border-color 0.14s;
+}
+.util-link:hover, .util-link:focus-visible {
+  color: var(--ink);
+  border-color: var(--edge);
+  outline: none;
+}
+.util-sep { color: var(--edge); font-size: 11px; user-select: none; }
+
+@media (max-width: 620px) {
+  .play-grid { grid-template-columns: 1fr; }
+  .play-card.is-lead { grid-column: 1 / -1; }
+}

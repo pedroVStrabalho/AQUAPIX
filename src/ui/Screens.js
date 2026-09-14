@@ -86,6 +86,32 @@ function menuItem(title, desc, tag, onClick, disabled = false) {
   return b;
 }
 
+/**
+ * A headline play card for the main menu.
+ *
+ * Deliberately not a `menuItem`: the whole point is that starting a game must
+ * not look like opening Settings. Each mode carries its own accent colour and
+ * glyph so the eye can tell them apart before reading a word.
+ */
+function playCard(opts) {
+  const b = el('button', `play-card ${opts.className ?? 'is-lead'}`);
+  b.style.setProperty('--accent', opts.accent);
+  b.style.setProperty('--wash', opts.wash);
+  b.appendChild(el('span', 'pc-glyph', opts.glyph));
+  if (opts.kicker) b.appendChild(el('div', 'pc-kicker', opts.kicker));
+  b.appendChild(el('div', 'pc-title', opts.title));
+  if (opts.desc) b.appendChild(el('div', 'pc-desc', opts.desc));
+  b.addEventListener('click', opts.onClick);
+  return b;
+}
+
+/** A quiet text link for tools and reference screens. */
+function utilLink(label, onClick) {
+  const b = el('button', 'util-link', label);
+  b.addEventListener('click', onClick);
+  return b;
+}
+
 function chipRow(options, value, onPick) {
   const wrap = el('div', 'field-control');
   for (const o of options) {
@@ -108,44 +134,53 @@ const SCREENS = {
 
   // ---------------------------------------------------------------- main ---
   main: (game, params, mgr) => shell('Main Menu', (body) => {
-    const list = el('div', 'menu-list');
-    list.appendChild(menuItem(
-      'Quick Match', 'Pick two clubs and a rules profile, then play.',
-      'Playable', () => mgr.show('matchSetup')));
-    list.appendChild(menuItem(
-      'Player Career', "You ARE a player: train, earn, live your life, then play the matches.",
-      'Playable', () => mgr.show('playerCreate')));
-    list.appendChild(menuItem(
-      'Coach Career', 'Run a club: sign players, an academy, the market, tactics, money and big decisions.',
-      'Playable', () => mgr.show('careerSetup')));
-    list.appendChild(menuItem(
-      'Training Arena', 'Isolated drills: shooting, passing under pressure, extra-player attack.',
-      'Playable', () => mgr.show('training')));
-    list.appendChild(menuItem(
-      'Teams and Rosters', 'Inspect and edit every fictional athlete in the league.',
-      'Playable', () => mgr.show('rosters')));
-    list.appendChild(menuItem(
-      'Controls', 'The full control scheme for gamepad and keyboard.',
-      null, () => mgr.show('controls')));
-    list.appendChild(menuItem(
-      'Settings', 'Graphics, water quality, camera, assistance and accessibility.',
-      null, () => mgr.show('settings')));
-    list.appendChild(menuItem(
-      'Implementation Status', 'An honest account of what is built, partial, designed or blocked.',
-      null, () => mgr.show('status')));
-    body.appendChild(list);
+    const grid = el('div', 'play-grid');
 
-    const note = el('div', 'card');
-    note.style.marginTop = '28px';
-    note.style.maxWidth = '560px';
-    note.appendChild(el('h3', null, 'Original intellectual property'));
-    note.appendChild(el('p', null,
-      'Every club, athlete, venue, competition and item of equipment in AQUAPIX is invented. ' +
-      'No real team, player, federation, sponsor or likeness appears anywhere in this build.'));
-    note.appendChild(el('p', null,
-      `Rules follow the ${getProfile('wa-2026').name} profile: 25 m field, four eight-minute periods, ` +
-      '28-second possession, 18-second secondary possession, 18-second exclusions, penalties from five metres.'));
-    body.appendChild(note);
+    grid.appendChild(playCard({
+      title: 'Quick Match', kicker: 'Jump in', glyph: '\u{1F93D}',
+      accent: '#7dd3fc', wash: 'linear-gradient(135deg, #0c3b52, #072433)',
+      desc: 'Pick two clubs and a rules profile, then play.',
+      onClick: () => mgr.show('matchSetup'),
+    }));
+
+    grid.appendChild(playCard({
+      title: 'Player Career', kicker: 'Be the athlete', glyph: '\u{1F3C5}',
+      accent: '#fbbf24', wash: 'linear-gradient(135deg, #4a3410, #221806)',
+      desc: 'You ARE a player: train, earn, live your life, then play the matches.',
+      onClick: () => mgr.show('playerCreate'),
+    }));
+
+    grid.appendChild(playCard({
+      title: 'Coach Career', kicker: 'Run the club', glyph: '\u{1F3DF}',
+      accent: '#4ade80', wash: 'linear-gradient(135deg, #0d3f2a, #051c13)',
+      className: 'is-wide',
+      desc: 'Sign players, run an academy, work the market and the money, and win a league.',
+      onClick: () => mgr.show('careerSetup'),
+    }));
+
+    grid.appendChild(playCard({
+      title: 'Training Arena', kicker: 'Practice', glyph: '\u{1F3AF}',
+      accent: '#c084fc', wash: 'linear-gradient(135deg, #331b4d, #180d24)',
+      className: 'is-wide is-compact',
+      desc: 'Isolated drills: shooting, passing under pressure, extra-player attack.',
+      onClick: () => mgr.show('training'),
+    }));
+
+    body.appendChild(grid);
+
+    // Tools and reference. Present, but not competing with the game itself.
+    const util = el('div', 'util-row');
+    const items = [
+      ['Teams and Rosters', 'rosters'],
+      ['Controls', 'controls'],
+      ['Settings', 'settings'],
+      ['Implementation Status', 'status'],
+    ];
+    items.forEach(([label, screen], i) => {
+      if (i) util.appendChild(el('span', 'util-sep', '\u00b7'));
+      util.appendChild(utilLink(label, () => mgr.show(screen)));
+    });
+    body.appendChild(util);
   }),
 
   // -------------------------------------------------------- match setup ---
@@ -539,7 +574,7 @@ const SCREENS = {
       ['counter', 'Counterattack', 'Turnover into transition, repeatedly.'],
     ];
     for (const [id, title, desc] of drills) {
-      list.appendChild(menuItem(title, desc, 'Playable', () => game.startTraining(id)));
+      list.appendChild(menuItem(title, desc, null, () => game.startTraining(id)));
     }
     body.appendChild(list);
 
@@ -555,6 +590,19 @@ const SCREENS = {
     body.appendChild(el('p', null,
       'Section 46, step 6 of the design bible requires an honest completion report. ' +
       'Nothing below is described as finished unless it is actually running in the match simulation.'));
+
+    // Moved here off the main menu: it is a statement of record, not something
+    // a player needs to read before choosing a game mode.
+    const ip = el('div', 'card');
+    ip.style.marginBottom = '18px';
+    ip.appendChild(el('h3', null, 'Original intellectual property'));
+    ip.appendChild(el('p', null,
+      'Every club, athlete, venue, competition and item of equipment in AQUAPIX is invented. ' +
+      'No real team, player, federation, sponsor or likeness appears anywhere in this build.'));
+    ip.appendChild(el('p', null,
+      `Rules follow the ${getProfile('wa-2026').name} profile: 25 m field, four eight-minute periods, ` +
+      '28-second possession, 18-second secondary possession, 18-second exclusions, penalties from five metres.'));
+    body.appendChild(ip);
 
     const groups = [
       ['Fully implemented and playable', 'tag-full', [

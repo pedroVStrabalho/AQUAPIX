@@ -183,9 +183,10 @@ export class MatchSim {
         if (a.isGoalkeeper) {
           a.pos.set(0, -dir * (f.length / 2 - 0.5));
         } else {
-          // Line up on their own goal line for the swim-off.
+          // Line up on their own goal line for the swim-off, in lanes.
           const spread = ((i - 3) / 3) * (f.width / 2 - 2.2);
           a.pos.set(spread, -dir * (f.length / 2 - 0.4));
+          a.vel.set(0, 0);
         }
         a.heading = dir > 0 ? 0 : Math.PI;
         a.shoulder = a.heading;
@@ -202,7 +203,7 @@ export class MatchSim {
 
   start() {
     this.setupPeriod();
-    this._setState(MATCH_STATE.PERIOD_SETUP, 2.4);
+    this._setState(MATCH_STATE.PERIOD_SETUP, 1.1);
     this._timeline(`Period ${this.period} - teams set.`);
   }
 
@@ -266,7 +267,7 @@ export class MatchSim {
     this._driveAthletes(dt, true);
     if (this.stateTimer <= 0) {
       if (this.profile.restarts.swimOffAtPeriodStart) {
-        this._setState(MATCH_STATE.SWIM_OFF, 8);
+        this._setState(MATCH_STATE.SWIM_OFF, 4);
         this.clockRunning = true;
         this.presentation.whistle = 1;
         // Release the ball on the half-distance line. It is genuinely loose:
@@ -357,7 +358,7 @@ export class MatchSim {
 
     // ---- Period end -------------------------------------------------------
     if (this.gameClock <= 0 && this.state !== MATCH_STATE.PERIOD_END) {
-      this._setState(MATCH_STATE.PERIOD_END, 2.5);
+      this._setState(MATCH_STATE.PERIOD_END, 1.2);
       this.clockRunning = false;
       this.presentation.whistle = 1;
       this._timeline(`End of period ${this.period}.`);
@@ -648,7 +649,7 @@ export class MatchSim {
     if (this.stateTimer > 0) return;
     const t = periodTransition(this.profile, this.period, this.score);
     if (!t.matchOver) {
-      this._setState(MATCH_STATE.INTERVAL, Math.min(t.intervalSeconds, 6)); // presentation-length interval
+      this._setState(MATCH_STATE.INTERVAL, Math.min(t.intervalSeconds, 2.5)); // presentation-length interval
       this.intervalRealSeconds = t.intervalSeconds;
       this._timeline(t.intervalSeconds > 200 ? 'Half time.' : 'Interval.');
     } else if (t.needsShootout) {
@@ -678,7 +679,7 @@ export class MatchSim {
         this._timeline('Teams change ends.');
       }
       this.setupPeriod();
-      this._setState(MATCH_STATE.PERIOD_SETUP, 2.2);
+      this._setState(MATCH_STATE.PERIOD_SETUP, 1.1);
       this._log('periodStart', { period: this.period });
     }
   }
@@ -766,11 +767,36 @@ export class MatchSim {
       // Swimming ability widens the effective reach for a loose ball - a faster,
       // more explosive swimmer wins the dispute (the user's "disputa de bola").
       const swim = clamp01((a.player.attr.swimSpeed * 0.6 + a.player.attr.firstStroke * 0.4 - 10) / 85);
-      const window = (a.isGoalkeeper ? 0.55 : 0.42) * (a === this.userAthlete ? this.assist.catchWindow : 1) +
-        a.reach * 0.42 + a.elevation * 0.35 + swim * 0.35 * lerp(0.6, 1, a.freshness);
+      // The intended receiver of a pass has the inside track on their own ball.
+      // Without this, opponents pick off far too many passes, possessions last
+      // only a few seconds and neither team ever gets to set up an attack.
+      // A SHOT at your own goal is the save system's business, not a casual
+      // pickup. The keeper's generous catch window was quietly gathering fast
+      // shots as ordinary loose balls, bypassing attemptSave entirely - which is
+      // why the goal looked impossible to beat from close range and why tuning
+      // the save model changed nothing. Slow or spent shots are still gatherable.
+      if (a.isGoalkeeper && b.kind === 'shot' && b.speed > 6) {
+        const gz = -a.attackDir * (this.profile.field.length / 2);
+        const towardMyGoal = Math.sign(b.vel.z) === Math.sign(gz - b.pos.z);
+        if (towardMyGoal && Math.abs(b.pos.z - gz) < 6) continue;
+      }
+
+      const isTarget = b.kind === 'pass' && b.intendedReceiver === a;
+      // Intercepting a pass in flight is hard: an opponent must genuinely get a
+      // hand in the lane, not merely be in the neighbourhood.
+      const isPass = b.kind === 'pass';
+      const opponentOfPasser = isPass && b.lastHolder && b.lastHolder.side !== a.side;
+      const intercept = opponentOfPasser ? 0.55 : 1;
+      // Now that the AI holds a real formation, passes cover water polo
+      // distances instead of the one metre between two players in a scrum. The
+      // receiver's advantage has to cover that range or two thirds of all
+      // possessions end in a turnover.
+      const window = ((a.isGoalkeeper ? 0.55 : 0.42) * (a === this.userAthlete ? this.assist.catchWindow : 1) +
+        a.reach * 0.42 + a.elevation * 0.35 + swim * 0.35 * lerp(0.6, 1, a.freshness)) * intercept +
+        (isTarget ? 0.55 : 0);
       if (d < window) {
         // Score by how comfortably they reach it, so the swimmer with margin wins.
-        const score = (window - d) + swim * 0.25;
+        const score = (window - d) + swim * 0.25 + (isTarget ? 0.6 : 0);
         if (score > bestScore) { bestScore = score; best = a; }
       }
     }
@@ -906,13 +932,24 @@ export class MatchSim {
 
   _awardGoal(side, ball) {
     this.score[side]++;
-    const scorer = ball.lastHolder && ball.lastHolder.side === side ? ball.lastHolder : null;
+    let scorer = ball.lastHolder && ball.lastHolder.side === side ? ball.lastHolder : null;
+    // Deflected in: credit the shooter whose attempt it was.
+    const ls = this._lastShooter;
+    if (!scorer && ls && ls.athlete.side === side && this.clockNow - ls.at < 4) scorer = ls.athlete;
     this.lastGoal = { side, scorer, at: this.clockNow, period: this.period, clock: this.gameClock };
 
     if (scorer) {
       scorer.stats.goals++;
       scorer.stats.shotsOnGoal++;
       this.stats[side].goals++;
+      this.stats[side].shotsOnGoal++;
+      // A rebound put back into the net is a shot attempt, even though it never
+      // went through the deliberate shooting path. Without this the goal counts
+      // but the attempt does not, and shooting percentage exceeds 100%.
+      if (ball.kind !== 'shot' && scorer !== this._lastShooter?.athlete) {
+        scorer.stats.shots++;
+        this.stats[side].shots++;
+      }
       if (this.transitionTimer > 0) { scorer.stats.counterGoals++; this.stats[side].counterGoals++; }
       if (this._pendingAssist && this.clockNow - this._pendingAssist.at < 4 && this._pendingAssist.from.side === side) {
         this._pendingAssist.from.stats.assists++;
@@ -938,20 +975,37 @@ export class MatchSim {
     this.ball.holder = null;
   }
 
+  /**
+   * Place both teams in a real water polo shape for a centre restart, in their
+   * own half, spread across the lanes their formation uses. Lining everyone up
+   * in a row at half way (the old behaviour) made the game look like a scramble
+   * every time anyone scored - and with frequent goals, that was most of it.
+   */
   _positionForCentreRestart(restartSide) {
     const f = this.profile.field;
     for (const side of ['home', 'away']) {
       const dir = this.attackDir[side];
-      const list = this.activeAthletes(side);
+      const list = this.activeAthletes(side).filter((a) => !a.isGoalkeeper);
+      const gk = this.activeAthletes(side).find((a) => a.isGoalkeeper);
+      if (gk) { gk.pos.set(0, -dir * (f.length / 2 - 0.6)); gk.vel.set(0, 0); }
+
+      // Lanes across the pool, and staggered depth, all inside their own half.
+      const lanes = [-5.2, -3.0, 0.0, 3.0, 5.2, -1.5];
+      const depth = [3.2, 5.0, 6.6, 5.0, 3.2, 8.0];   // metres back from half way
+      const restarting = side === restartSide;
       list.forEach((a, i) => {
-        if (a.isGoalkeeper) { a.pos.set(0, -dir * (f.length / 2 - 0.6)); return; }
-        const own = side === restartSide;
-        const z = own ? -dir * 1.2 : -dir * 4.0;
-        a.pos.set(((i - 3) / 3) * (f.width / 2 - 2.4), z);
+        const lane = lanes[i % lanes.length];
+        const back = depth[i % depth.length] * (restarting ? 0.75 : 1.0);
+        a.pos.set(lane, -dir * back);
         a.vel.set(0, 0);
         a.heading = dir > 0 ? 0 : Math.PI;
         a.shoulder = a.heading;
       });
+      // The athlete taking the restart sits on the half-distance line.
+      if (restarting && list.length) {
+        const taker = list.slice().sort((x, y) => Math.abs(x.pos.x) - Math.abs(y.pos.x))[0];
+        taker.pos.set(0, -dir * 0.8);
+      }
     }
     this.roleDirty = true;
   }
@@ -1201,7 +1255,19 @@ export class MatchSim {
   tryPass(passer, target, type = PASS_TYPES.DRY, power = 0.6) {
     if (!passer.hasBall || passer.actionLock > 0) return false;
     const opponents = this.activeAthletes(this.opponentSide(passer.side));
-    const aim = target.pos ? { x: target.pos.x, z: target.pos.z } : target;
+    // Lead the receiver. A pass is aimed at where the swimmer WILL be, not where
+    // they are: at 7-15 m/s a cross-pool pass is airborne for most of a second,
+    // and a receiver swimming at 3 m/s has left by the time it arrives. This
+    // only began to matter once the AI held a real formation - when the whole
+    // team was bunched a metre apart, every pass was point blank and the missing
+    // lead was invisible.
+    const aim = target.pos
+      ? (() => {
+          const flight = Math.hypot(target.pos.x - passer.pos.x, target.pos.z - passer.pos.z) / 11;
+          const t = Math.min(flight, 0.9);
+          return { x: target.pos.x + target.vel.x * t, z: target.pos.z + target.vel.z * t };
+        })()
+      : target;
     const assist = passer === this.userAthlete ? this.assist.pass : 0.55;
 
     const res = resolvePass(passer, aim, {
@@ -1270,6 +1336,10 @@ export class MatchSim {
     this.ball.intendedReceiver = null;
     this.ball.launch(res.from, res.vel, res.spin, 'shot', shooter);
     this.lastShot = res;
+    // Remember who shot, so a shot that goes in off a keeper's hand or a
+    // blocker still belongs to the shooter. Otherwise the goal is recorded with
+    // no scorer and no attempt, and shooting percentage climbs above 100%.
+    this._lastShooter = { athlete: shooter, at: this.clockNow };
     this.bus.emit('shot', { shooter, res });
     this._log('shot', { by: shooter.id, shotType, quality: +res.quality.toFixed(3), timing: +timing.toFixed(2) });
 
@@ -1307,8 +1377,8 @@ export class MatchSim {
 
     const timing = clamp01((defender.player.attr.stealTiming - 10) / 85);
     const security = clamp01((carrier.player.attr.ballSecurity - 10) / 85);
-    const p = clamp01(0.55 * timing - 0.4 * security + 0.25 * (1 - clamp01(ballD / 1.2)) +
-      (carrier.speed > 1.2 ? 0.1 : 0) - carrier.freshness * 0.1 + defender.freshness * 0.1);
+    const p = clamp01(0.38 * timing - 0.48 * security + 0.18 * (1 - clamp01(ballD / 1.2)) +
+      (carrier.speed > 2.4 ? 0.08 : 0) - carrier.freshness * 0.08 + defender.freshness * 0.08);
 
     if (this.rng.chance(p)) {
       carrier.hasBall = false;
@@ -1344,8 +1414,14 @@ export class MatchSim {
       const hand = a.handPoint();
       const reach = a.reach * (0.75 + 0.55 * a.armRaised) + a.elevation * 0.4;
       if (this.ball.distanceTo(hand.x, hand.y + 0.25, hand.z) < reach) {
+        // ONE swipe per defender per shot. This used to roll every frame for the
+        // 0.55s the arm was up - about thirty rolls - so any defender within
+        // reach blocked almost certainly, and 44% of all shots died on a
+        // team-mate's arm rather than reaching the keeper.
+        if (this.ball.blockTriedBy?.has(a.id)) continue;
+        this.ball.blockTriedBy?.add(a.id);
         const timing = clamp01((a.player.attr.blockTiming - 10) / 85);
-        if (this.rng.chance(0.35 + timing * 0.5)) {
+        if (this.rng.chance(0.12 + timing * 0.28)) {
           a.stats.blocks++;
           this.stats[a.side].blocks++;
           const s = this.ball.speed * 0.45;

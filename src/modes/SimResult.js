@@ -27,6 +27,16 @@ export function simulateByStars(homeRoster, awayRoster, rng) {
   const diff = (hStars + homeEdge) - aStars;
   const absGap = Math.abs(diff);
 
+  // Evenly matched sides sometimes simply draw. Without this the margin is
+  // forced to at least one goal and a simmed league produces literally zero
+  // draws across a whole season, which no real competition does.
+  const drawChance = Math.max(0.02, 0.20 - absGap * 0.16);
+  if (rng.chance(drawChance)) {
+    const goals = rng.int(4, 9);
+    return { home: goals, away: goals, upset: false, draw: true,
+      hStars: +hStars.toFixed(2), aStars: +aStars.toFixed(2) };
+  }
+
   // One simmed match in four is an upset - the team that "should" lose, wins.
   const upset = rng.chance(0.25);
   let favourite = diff >= 0 ? 'home' : 'away';

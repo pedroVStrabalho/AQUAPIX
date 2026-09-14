@@ -273,7 +273,7 @@ export class TeamAI {
           const slot = system.slots[slotI % system.slots.length]; slotI++;
           const w = slotToWorld(slot, p.attackDir, sim.profile);
           const to = new Vec2(w.x - p.pos.x, w.z - p.pos.z);
-          p.cmd = { dir: to.length() > 0.4 ? to.normalize() : null, effort: clamp01(to.length() / 4) * 0.7, rise: 0.2, face: null, brace: false };
+          p.cmd = { dir: to.length() > 0.4 ? to.normalize() : null, effort: clamp01(to.length() / 4) * 0.9, arriveDist: to.length(), rise: 0.2, face: null, brace: false };
         }
       }
       return;
@@ -316,13 +316,18 @@ export class TeamAI {
     this._enforceSpacing(sim, mine);
   }
 
+  /**
+   * Personal space. This is deliberately a gentle NUDGE, not an override: the
+   * formation decides where a player belongs, and this only stops two teammates
+   * occupying the same water. An aggressive version of this locked the whole
+   * team into a straight line and stopped formations forming at all.
+   */
   _enforceSpacing(sim, mine) {
-    const SPACE = 3.1;
+    const SPACE = 2.7;
     for (const p of mine) {
       if (!p.inPool || p.isGoalkeeper || !p.cmd) continue;
-      if (p === sim.ball.holder) continue;                 // the carrier goes where it wants
+      if (p === sim.ball.holder) continue;
       if (sim.userControlsSide === this.side && p === sim.userAthlete) continue;
-      // The single nearest teammate to the ball is allowed to approach it.
       let sx = 0, sz = 0, crowd = 0;
       for (const t of mine) {
         if (t === p || t.isGoalkeeper || !t.inPool) continue;
@@ -334,43 +339,50 @@ export class TeamAI {
       if (sep.length() < 0.05) continue;
       sep.normalize();
       const cur = p.cmd.dir ?? new Vec2(0, 0);
-      // Blend: the tighter the crowding, the more separation dominates.
-      const w = clamp01(0.4 + crowd * 0.25);
-      const blended = new Vec2(cur.x * (1 - w) + sep.x * (0.6 + w), cur.z * (1 - w) + sep.z * (0.6 + w));
+      // Small, fixed blend so intent always wins over the nudge.
+      const blended = new Vec2(cur.x + sep.x * 0.5, cur.z + sep.z * 0.5);
       if (blended.length() > 0.05) { blended.normalize(); p.cmd.dir = blended; }
-      p.cmd.effort = Math.max(p.cmd.effort ?? 0, 0.5);
+      // Crowded players need room to actually move out of the pile.
+      p.cmd.arriveDist = Math.max(p.cmd.arriveDist ?? 0, 1.2);
+      p.cmd.effort = Math.max(p.cmd.effort ?? 0, 0.55);
     }
   }
 
   /**
-   * Contest a loose ball. Returns a command when this athlete should go for it,
-   * otherwise null so the normal offensive or defensive behaviour applies.
-   * The two nearest athletes on each team commit; the rest keep their shape so
-   * a scramble never turns into everybody swimming at the ball.
+   * Contest a loose ball. Only the single nearest teammate goes for it (plus
+   * anyone it lands on top of); everyone else keeps their shape. A loose ball is
+   * not a signal for the whole team to swim into one spot.
    */
   _looseBall(p, ctx, mine, opp) {
     const { sim } = ctx;
     const ball = sim.ball;
     if (!ball.isLoose || ball.timeSinceLoose < 0.08) return null;
     if (p.isGoalkeeper) return null;
-    // A pass in flight is not a loose ball - it belongs to the intended receiver,
-    // who is already moving to it. Only genuinely free balls (a shot rebound, a
-    // deflection, a knocked-away ball, or a pass that has gone astray) are
-    // contested, otherwise the whole team collapses onto every pass.
+    // A pass in flight belongs to its intended receiver, who is already moving
+    // to it - the rest of the team must not collapse onto every pass.
     if (ball.kind === 'pass' && ball.timeSinceLoose < 1.4) {
       const rx = ball.intendedReceiver;
-      if (!rx || rx.side === p.side) return null;
+      // ...but the intended receiver is the one player who MUST go and meet it.
+      // Lumping them in with their teammates meant nobody moved to the ball for
+      // the first 1.4s of every pass, so passes routinely died in open water.
+      if (rx === p) { /* fall through and swim to it */ }
+      else if (!rx || rx.side === p.side) return null;
     }
 
     const d = (a) => Math.hypot(ball.pos.x - a.pos.x, ball.pos.z - a.pos.z);
     const mineRanked = mine.filter((a) => a.inPool && !a.isGoalkeeper).sort((a, b) => d(a) - d(b));
     const rank = mineRanked.indexOf(p);
     const myDist = d(p);
-
-    // Only the single nearest teammate goes for it, plus anyone the ball is
-    // practically on top of. Everyone else keeps their spacing - a loose ball is
-    // not a signal for the whole team to swim into one spot.
-    if (rank > 0 && myDist > 1.4) return null;
+    // Rank-based, never proximity-based. The old rule let anyone within 1.4m
+    // chase, which is self-reinforcing: once the team bunches, everyone is
+    // within 1.4m of the ball, so everyone chases, so the bunch never breaks up.
+    // Ranking can't cascade like that. The second-nearest joins only a genuine
+    // scramble - a ball that has been loose long enough to be up for grabs, not
+    // a pass in flight - because leaving rebounds to one player alone let balls
+    // trickle into the net unchallenged.
+    const scramble = ball.timeSinceLoose > 0.5 && myDist < 3.0;
+    const isTarget = ball.kind === 'pass' && ball.intendedReceiver === p;
+    if (!isTarget && rank > (scramble ? 1 : 0)) return null;
 
     // Lead the ball rather than swimming at where it currently is.
     const lead = clamp01(myDist / 6) * 0.42;
@@ -380,8 +392,8 @@ export class TeamAI {
     const cmd = { dir: null, effort: 1, rise: 0, face: null, brace: false };
     const to = new Vec2(tx - p.pos.x, tz - p.pos.z);
     if (to.length() > 0.12) cmd.dir = to.normalize();
+    cmd.arriveDist = Math.max(myDist, 1.5);
     cmd.face = Math.atan2(ball.pos.x - p.pos.x, ball.pos.z - p.pos.z);
-    // Reach up for a ball that is still in the air.
     if (ball.pos.y > 0.55) cmd.rise = clamp01((ball.pos.y - 0.3) / 0.9);
     if (myDist < 0.9) cmd.effort = 0.55;
 
@@ -399,12 +411,20 @@ export class TeamAI {
     const carrier = ball.holder;
     const cmd = { dir: null, effort: 0, rise: 0, face: null, brace: false };
 
-    // --- Counterattack: the whole team sprints or nobody does --------------
+    // --- Counterattack --------------------------------------------------
+    // Only the two best-placed swimmers break; the rest build the set. And they
+    // sprint up their OWN LANE (their formation x), not straight at the ball -
+    // otherwise the whole team converges on one spot and it looks like everyone
+    // is chasing the ball.
     const counterLane = this._counterValue(p, sim, opp);
-    if (sim.transitionTimer > 0 && counterLane > 0.45) {
+    if (sim.transitionTimer > 0 && counterLane > 0.45 && this._isCounterRunner(p, mine, sim)) {
+      const slotW = p.roleSlot ? slotToWorld(p.roleSlot, p.attackDir, profile) : { x: p.pos.x, z: 0 };
       const goalZ = p.attackDir * (profile.field.length / 2 - 3.2);
-      cmd.dir = new Vec2(clamp(p.pos.x, -6, 6) - p.pos.x, goalZ - p.pos.z).normalize();
+      const to = new Vec2(slotW.x - p.pos.x, goalZ - p.pos.z);
+      cmd.arriveDist = to.length();
+      cmd.dir = to.normalize();
       cmd.effort = 1;
+      cmd.sprint = true;
       this._note(p, 'counter sprint', counterLane);
       if (p === carrier) return this._carrier(p, dt, ctx, mayAct, opp, mine, cmd);
       return cmd;
@@ -417,6 +437,19 @@ export class TeamAI {
     const system = p.roleSlot?.system ?? OFFENSIVE_SYSTEMS[this.tactics.offense];
     const slot = p.roleSlot ?? system.slots[slotIndex ?? 0];
     let target = slotToWorld(slot, p.attackDir, profile);
+
+    // Until the attack is established the shape travels WITH the ball: hold your
+    // lane across the pool and stay level with play. Sprinting the full length of
+    // the pool to a fixed spot leaves the whole team strung out behind the ball,
+    // which is what made it look like everyone was chasing it.
+    {
+      const goalZ2 = p.attackDir * (profile.field.length / 2);
+      const ballZ = sim.ball.pos.z;
+      const ballToGoal = Math.abs(goalZ2 - ballZ);
+      const setness = clamp01((11 - ballToGoal) / 5);   // 1 once we are in the attacking third
+      const transitZ = ballZ + p.attackDir * clamp(4.5 - slot.d * 0.5, -1.5, 3.5);
+      target = { x: target.x, z: lerp(transitZ, target.z, setness) };
+    }
 
     const isCentre = slot.role === 'CF' || slot.role === 'post';
     const marker = opp.find((d) => d.markTarget === p) ??
@@ -438,10 +471,12 @@ export class TeamAI {
         target = { x: p.pos.x + away.x * 0.6, z: p.pos.z + away.z * 0.4 };
       }
     } else if (mayAct && this.driveTimer <= 0 && carrier &&
+               Math.hypot(target.x - p.pos.x, target.z - p.pos.z) < 3.0 &&
                this.rng.next() < system.driveBias * this.plan.tempo * 0.35) {
       // Drive: cut hard toward the goal through the gap the marker leaves.
-      this.driveTimer = this.rng.range(1.6, 3.4);
-      p.driving = { until: sim.clockNow + this.rng.range(1.1, 2.0), lane: this.rng.range(-1, 1) };
+      const driveFor = this.rng.range(1.0, 1.7);
+      p.driving = { until: sim.clockNow + driveFor, lane: this.rng.range(-1, 1) };
+      this.driveTimer = driveFor + this.rng.range(1.8, 3.2);  // outlast the drive
     }
 
     if (p.driving && sim.clockNow < p.driving.until) {
@@ -457,8 +492,8 @@ export class TeamAI {
       for (const t of mine) {
         if (t === p || t.isGoalkeeper) continue;
         const d = dist2(t.pos, p.pos);
-        if (d < 3.4 && d > 1e-3) {
-          const push = (3.4 - d) * 0.7;
+        if (d < 2.4 && d > 1e-3) {
+          const push = (2.4 - d) * 0.5;
           target.x += (p.pos.x - t.pos.x) / d * push;
           target.z += (p.pos.z - t.pos.z) / d * push;
         }
@@ -467,21 +502,52 @@ export class TeamAI {
 
     // Final separation pass, applied in every case so the shape never collapses -
     // even a sealing centre or a driver keeps a metre of water around teammates.
+    // The push is accumulated and then CLAMPED: summing five unclamped pushes
+    // used to fling the target tens of metres outside a 10x25m pool, which made
+    // the steering meaningless (every player just sprinted at a wall).
+    let px = 0, pz = 0;
     for (const t of mine) {
       if (t === p || t.isGoalkeeper) continue;
       const dd = dist2(t.pos, p.pos);
       if (dd < 2.8 && dd > 1e-3) {
         const push = (2.8 - dd) * 1.5;
-        target.x += (p.pos.x - t.pos.x) / dd * push;
-        target.z += (p.pos.z - t.pos.z) / dd * push;
+        px += (p.pos.x - t.pos.x) / dd * push;
+        pz += (p.pos.z - t.pos.z) / dd * push;
       }
     }
+    const pl = Math.hypot(px, pz);
+    if (pl > 2.5) { px = px / pl * 2.5; pz = pz / pl * 2.5; }
+    target = { x: target.x + px, z: target.z + pz };
 
-    const to = new Vec2(target.x - p.pos.x, target.z - p.pos.z);
-    const d = to.length();
+    // Keep the target inside the water. An unreachable target reads as a player
+    // swimming into the wall instead of taking up a position.
+    const halfW = profile.field.width / 2 - 0.6;
+    const halfL = profile.field.length / 2 - 0.6;
+    target = { x: clamp(target.x, -halfW, halfW), z: clamp(target.z, -halfL, halfL) };
+
+    // Fan out into your LANE first, then advance up the pool. Without this the
+    // whole team travels from a turnover as one blob directly behind the ball,
+    // which is what reads as "everyone is chasing the ball".
+    // STABILISE THE STATION. Everything above recomputes a fresh target 60 times
+    // a second - slot, transit blend, separation pushes, drive rolls - and the
+    // result jitters far faster than a swimmer can respond. Measured: off-ball
+    // players sat 8m from their own target and closed on it only 49% of frames,
+    // i.e. a coin flip, so nobody ever arrived anywhere and the whole team just
+    // hovered around the ball. Easing the station with a ~0.3s time constant
+    // filters the jitter while still tracking genuine changes within half a
+    // second. This is what lets a formation actually form.
+    target = smoothTarget(p, target, dt);
+
+    const dxs = target.x - p.pos.x;
+    const dzs = target.z - p.pos.z;
+    const d = Math.hypot(dxs, dzs);
+    const lateralBias = 1 + clamp01(d / 6) * 1.8;
+    const to = new Vec2(dxs * lateralBias, dzs);
     cmd.dir = d > 0.25 ? to.normalize() : null;
+    cmd.arriveDist = d;
     // Get to the spread set quickly after a turnover - crowding is the enemy.
-    cmd.effort = Math.max(cmd.effort, clamp01(d / 2.0) * lerp(0.6, 1.0, this.plan.tempo));
+    cmd.effort = Math.max(cmd.effort, clamp01(d / 1.5) * lerp(0.8, 1.0, this.plan.tempo));
+    if (d > 4) cmd.sprint = true;   // sprint into the set, then settle
     if (!isCentre && carrier) cmd.face = Math.atan2(carrier.pos.x - p.pos.x, carrier.pos.z - p.pos.z);
     if (d < 0.6 && !p.driving) { cmd.rise = Math.max(cmd.rise, 0.3); cmd.effort *= 0.5; }
     return cmd;
@@ -595,7 +661,7 @@ export class TeamAI {
     });
 
     options.sort((a, b) => b.score - a.score);
-    const choice = options[0];
+    let choice = options[0];
     this._note(p, choice.kind, choice.score, options.slice(1, 4));
 
     // --- Execute (layer 6) -------------------------------------------------
@@ -607,7 +673,15 @@ export class TeamAI {
     // good enough and there is still time, the carrier falls through to driving
     // rather than standing still holding the ball.
     const desperate = clock < 4.0;
-    const willShoot = choice.kind === 'shoot' && (choice.quality > 0.24 || desperate);
+    // A dying shot clock must produce a SHOT, not merely permit one. Requiring
+    // the shot to already be the best-scoring option meant a carrier who
+    // preferred a pass or a drive simply ran the clock out, so possessions ended
+    // in shot-clock turnovers instead of attempts on goal.
+    if (desperate && choice.kind !== 'shoot') {
+      const shotOpt = options.find((o) => o.kind === 'shoot');
+      if (shotOpt) choice = shotOpt;
+    }
+    const willShoot = choice.kind === 'shoot' && (choice.quality > 0.14 || desperate);
 
     if (mayAct && !p.actionLock && settled) {
       if (willShoot) {
@@ -621,7 +695,7 @@ export class TeamAI {
           sim.tryShot(p, choice.aim, type, clamp01(0.55 + this.plan.riskTolerance * 0.4 + this.rng.gauss(0, this.diff.error)));
           this.memory.noteShot(p, p.pos, p.pumpFakes > 0);
         }
-      } else if (choice.kind === 'pass' && choice.lane > 0.18) {
+      } else if (choice.kind === 'pass' && choice.lane > 0.45) {
         sim.tryPass(p, choice.target, choice.type, clamp01(0.5 + dist2(p.pos, choice.target.pos) / 22));
         if (choice.type === PASS_TYPES.ENTRY) this.memory.noteCentreEntry(p.pos.x);
       }
@@ -629,11 +703,19 @@ export class TeamAI {
 
     // If the carrier wanted to shoot but the shot was not on, treat the movement
     // as a drive so it works to a better position instead of loitering.
-    if (choice.kind === 'shoot' && !willShoot && choice.quality < 0.24) choice.kind = 'drive';
+    if (choice.kind === 'shoot' && !willShoot && choice.quality < 0.14) choice.kind = 'drive';
 
     // --- Movement ----------------------------------------------------------
     if (choice.kind === 'drive') {
-      cmd.dir = new Vec2(p.pos.x * -0.25, goalZ - p.pos.z).normalize();
+      // Drive to the edge of the restricted area, not to the goal line. Driving
+      // at the line itself meant carriers swam the ball into the goal mouth and
+      // scored from a median of 0.7m - which is both against the two metre rule
+      // and unsaveable, so every shot went in from point blank.
+      const hold = profile.field.restrictedLine + 0.8;
+      const stopZ = goalZ - p.attackDir * hold;
+      const to = new Vec2(p.pos.x * -0.25, stopZ - p.pos.z);
+      cmd.arriveDist = Math.abs(stopZ - p.pos.z);
+      cmd.dir = to.length() > 0.2 ? to.normalize() : null;
       cmd.effort = 1;
     } else if (choice.kind === 'shoot') {
       cmd.rise = 0.95;
@@ -657,15 +739,24 @@ export class TeamAI {
       for (const t of mine) {
         if (t === p || t.isGoalkeeper) continue;
         const d = dist2(t.pos, p.pos);
-        if (d < 3.0 && d > 1e-3) { sepX += (p.pos.x - t.pos.x) / d * (3.0 - d) * 0.5; sepZ += (p.pos.z - t.pos.z) / d * (3.0 - d) * 0.5; }
+        if (d < 2.2 && d > 1e-3) { sepX += (p.pos.x - t.pos.x) / d * (2.2 - d) * 0.35; sepZ += (p.pos.z - t.pos.z) / d * (2.2 - d) * 0.35; }
       }
       const to = new Vec2(tx - p.pos.x + sepX, tz - p.pos.z + sepZ);
+      cmd.arriveDist = to.length();
       cmd.dir = to.length() > 0.3 ? to.normalize() : null;
       cmd.effort = Math.max(clamp01(to.length() / 3) * 0.75, needToAdvance * 0.65);
       cmd.rise = 0.3;
       cmd.brace = pressure > 0.5;
     }
     return cmd;
+  }
+
+  /** At most two athletes break on a counter; everyone else builds the set. */
+  _isCounterRunner(p, mine, sim) {
+    const goalZ = p.attackDir * (sim.profile.field.length / 2);
+    const ranked = mine.filter((a) => a.inPool && !a.isGoalkeeper)
+      .sort((a, b) => Math.abs(goalZ - a.pos.z) - Math.abs(goalZ - b.pos.z));
+    return ranked.indexOf(p) < 2;
   }
 
   _counterValue(p, sim, opp) {
@@ -716,7 +807,22 @@ export class TeamAI {
       this._note(p, 'man-down zone', 1);
     } else {
       const markId = this.markAssign.get(p.id);
-      const mark = opp.find((o) => o.id === markId) ?? p.markTarget;
+      let mark = opp.find((o) => o.id === markId) ?? p.markTarget;
+
+      // Somebody must always be on the ball. If the carrier is unmarked - which
+      // happens constantly as attackers rotate out of their assigned slots - the
+      // nearest defender picks them up. Without this the shape looks correct but
+      // nobody actually contests the shot, and every attack ends in a goal.
+      if (carrier && carrier.side !== p.side && mark !== carrier) {
+        const marked = mine.some((q) => q !== p && !q.isGoalkeeper && q.inPool &&
+          (opp.find((o) => o.id === this.markAssign.get(q.id)) ?? q.markTarget) === carrier);
+        if (!marked) {
+          const nearest = mine.filter((q) => !q.isGoalkeeper && q.inPool)
+            .sort((a, b) => dist2(a.pos, carrier.pos) - dist2(b.pos, carrier.pos))[0];
+          if (nearest === p) mark = carrier;
+        }
+      }
+
       if (!mark) {
         const own = defendDir * (profile.field.length / 2 - 4);
         target = { x: p.pos.x * 0.6, z: own };
@@ -765,7 +871,14 @@ export class TeamAI {
     const to = new Vec2(target.x - p.pos.x, target.z - p.pos.z);
     const d = to.length();
     cmd.dir = d > 0.2 ? to.normalize() : null;
+    cmd.arriveDist = d;
     cmd.effort = clamp01(d / 2.6) * lerp(0.5, 1.0, this.plan.pressLevel);
+    // A defender who has arrived at their marking spot would otherwise sit at
+    // zero effort and let the carrier swim away from them. Marking the ball is
+    // active work: stay with them.
+    if (carrier && carrier.side !== p.side && dist2(p.pos, carrier.pos) < 4.5) {
+      cmd.effort = Math.max(cmd.effort, 0.8);
+    }
     if (d < 0.5) cmd.rise = Math.max(cmd.rise, 0.4);
     return cmd;
   }
@@ -773,6 +886,27 @@ export class TeamAI {
   _note(athlete, action, score, rejected = []) {
     this.lastDecision.set(athlete.id, { action, score, rejected: rejected.map((r) => `${r.kind} ${r.score.toFixed(2)}`) });
   }
+}
+
+/**
+ * Ease an athlete's held station toward a freshly computed target.
+ *
+ * Steering wants a destination that is stable for long enough to swim to. A
+ * target that is re-derived every frame is noise, not intent. The station snaps
+ * instead of easing when the new target is a long way off, so genuine events -
+ * a turnover, a change of end - are picked up immediately rather than smeared.
+ */
+function smoothTarget(p, target, dt) {
+  const held = p.aiStation;
+  if (!held) { p.aiStation = { x: target.x, z: target.z }; return target; }
+  if (Math.hypot(target.x - held.x, target.z - held.z) > 6) {
+    p.aiStation = { x: target.x, z: target.z };
+    return target;
+  }
+  const k = 1 - Math.exp(-dt / 0.3);
+  held.x += (target.x - held.x) * k;
+  held.z += (target.z - held.z) * k;
+  return { x: held.x, z: held.z };
 }
 
 const clampToZero = (v) => (v > 0 ? v : 0);

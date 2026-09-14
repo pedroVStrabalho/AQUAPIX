@@ -109,9 +109,13 @@ export class Athlete {
   refresh() {
     const a = this.player.attr;
     const form = this.player.form ?? 1;
-    this.maxSpeed = lerp(1.42, 2.02, a01(a.swimSpeed)) * form;
-    this.accelBase = lerp(1.05, 2.35, a01(a.firstStroke));
-    this.turnBase = lerp(2.0, 4.2, a01(a.changeOfDirection));
+    // ARCADE PACE. Real swimmers do ~2 m/s, which means 12 seconds to cross the
+    // pool - that reads as "the controls don't work". These are deliberately
+    // arcade speeds: cross the pool in ~5s, reach top speed in well under a
+    // second, and turn sharply. Attributes still separate fast from slow players.
+    this.maxSpeed = lerp(3.1, 4.3, a01(a.swimSpeed)) * form;
+    this.accelBase = lerp(6.0, 10.0, a01(a.firstStroke));
+    this.turnBase = lerp(4.5, 7.5, a01(a.changeOfDirection));
     this.maxElevation = lerp(0.34, 0.72, a01(a.legPower) * 0.7 + a01(a.verticalReach) * 0.3);
     this.riseRate = lerp(1.5, 3.4, a01(a.explosiveness) * 0.6 + a01(a.legPower) * 0.4);
     this.enduranceK = lerp(1.35, 0.62, a01(a.endurance));
@@ -171,7 +175,7 @@ export class Athlete {
 
     // ---- Body orientation: swimming is horizontal, elevation is vertical --
     // Moving fast pulls the body flat; requesting elevation stands it up.
-    const wantVertical = clamp01(Math.max(rise, cmd.brace ? 0.85 : 0) + (1 - wantMove) * 0.75);
+    const wantVertical = clamp01(Math.max(rise, cmd.brace ? 0.85 : 0) * (1 - wantMove * 0.55) + (1 - wantMove) * 0.75);
     const orientLambda = wantVertical > this.verticality ? 5.5 : 3.6;
     this.verticality = damp(this.verticality, wantVertical, orientLambda * (0.6 + 0.6 * a01(this.player.attr.bodyControl)), dt);
 
@@ -179,8 +183,15 @@ export class Athlete {
     const swimEfficiency = lerp(1, 0.28, smoothstep(this.verticality));
 
     // ---- Turning ----------------------------------------------------------
+    // Heading is where you SWIM; face is where you LOOK. These must stay
+    // separate. Thrust is produced along the body axis only (see below), so
+    // letting cmd.face overwrite the swim heading meant that every AI player
+    // who was told to "watch the ball" - which is nearly all of them, nearly
+    // all the time - physically swam at the ball instead of to their position.
+    // That single line was the cause of the whole team collapsing into a scrum
+    // around the ball no matter what the formation logic asked for.
     if (dir && wantMove > 0.05) this.desiredHeading = dir.angle();
-    if (cmd.face != null) this.desiredHeading = cmd.face;
+    else if (cmd.face != null) this.desiredHeading = cmd.face;   // treading: turn to watch play
 
     const speedFrac = clamp01(this.speed / this.maxSpeed);
     // Turning radius grows with speed while horizontal; eggbeater spins freely.
@@ -190,13 +201,26 @@ export class Athlete {
       * lerp(1.0, 1.45, this.verticality);
     this.heading = turnToward(this.heading, this.desiredHeading, turnRate * dt);
     // Shoulders lag the head: you cannot shoot at what you have only just turned to.
+    // The shoulders - not the legs - are what follow cmd.face, so an athlete can
+    // swim to their position while keeping the ball in view, and still pass or
+    // shoot where the AI aimed.
+    const aim = cmd.face != null ? cmd.face : this.heading;
     const shoulderRate = turnRate * lerp(0.55, 0.95, a01(this.player.attr.bodyControl));
-    this.shoulder = turnToward(this.shoulder, this.heading, shoulderRate * dt);
+    this.shoulder = turnToward(this.shoulder, aim, shoulderRate * dt);
 
     // ---- Propulsion -------------------------------------------------------
     const fatigueSpeed = lerp(0.62, 1.0, this.freshness);
-    const ballPenalty = this.hasBall ? lerp(0.80, 0.93, a01(this.player.attr.ballSecurity)) : 1;
-    const vMax = this.maxSpeed * fatigueSpeed * ballPenalty * lerp(0.55, 1.0, effort > 0 ? lerp(0.62, 1, effort) : 0.62);
+    const ballPenalty = this.hasBall ? lerp(0.86, 0.96, a01(this.player.attr.ballSecurity)) : 1;
+    // Sprint is a real burst you can feel, paid for in burst stamina.
+    const sprintBoost = (cmd.sprint && this.burst > 0.08) ? lerp(1.0, 1.3, clamp01(this.burst)) : 1;
+    let vMax = this.maxSpeed * fatigueSpeed * ballPenalty * sprintBoost
+      * lerp(0.70, 1.0, effort > 0 ? lerp(0.7, 1, effort) : 0.7);
+    // Arrival damping: when the caller says how far the target is, cap speed to
+    // what can still be stopped in that distance (v = sqrt(2*a*d)). Without this
+    // the faster arcade athletes overshoot every position and oscillate.
+    if (cmd.arriveDist != null) {
+      vMax = Math.min(vMax, Math.sqrt(Math.max(0, 2 * this.accelBase * 0.85 * cmd.arriveDist)) + 0.15);
+    }
     const accel = this.accelBase * effort * swimEfficiency * lerp(0.6, 1.0, this.freshness);
 
     // Quadratic water resistance tuned so that propulsion balances drag at vMax.
@@ -245,9 +269,12 @@ export class Athlete {
     this._updateElevation(dt, rise, cmd.brace);
 
     // ---- Stamina ----------------------------------------------------------
+    // Cruising is sustainable; sprinting, elevating and wrestling are what cost
+    // you. Without this, "always full effort" movement drains everyone in
+    // seconds and the whole pool looks exhausted from nowhere.
     const workload =
-      effort * (sprinting ? 1.0 : 0.55) * this.enduranceK * 0.9 +
-      rise * rise * this.burstK * 0.75 +
+      effort * (cmd.sprint ? 1.05 : 0.34) * this.enduranceK +
+      rise * rise * this.burstK * 0.7 +
       this.contactLoad * 0.5;
     this._recover(dt, workload);
     this.exertion = damp(this.exertion, clamp01(workload * 0.9 + speedFrac * 0.35), 6, dt);
@@ -309,6 +336,20 @@ export class Athlete {
     const f = world.profile.field;
     const halfW = f.width / 2 - 0.35;
     const halfL = f.length / 2 - 0.3;
+
+    // Goalkeepers stay home. They may come off their line, but never upfield -
+    // a keeper wandering to half way leaves an empty net and looks broken.
+    if (this.isGoalkeeper) {
+      const ownGoalZ = -this.attackDir * (f.length / 2);
+      const maxOut = 3.2;                       // metres off the goal line
+      const lo = Math.min(ownGoalZ, ownGoalZ + this.attackDir * maxOut);
+      const hi = Math.max(ownGoalZ, ownGoalZ + this.attackDir * maxOut);
+      if (this.pos.z < lo) { this.pos.z = lo; this.vel.z = Math.max(0, this.vel.z) * 0.3; }
+      if (this.pos.z > hi) { this.pos.z = hi; this.vel.z = Math.min(0, this.vel.z) * 0.3; }
+      const gkX = f.goalWidth / 2 + 1.6;
+      if (this.pos.x < -gkX) { this.pos.x = -gkX; this.vel.x = Math.max(0, this.vel.x) * 0.3; }
+      if (this.pos.x > gkX) { this.pos.x = gkX; this.vel.x = Math.min(0, this.vel.x) * 0.3; }
+    }
     if (this.pos.x < -halfW) { this.pos.x = -halfW; this.vel.x = Math.max(0, this.vel.x) * 0.4; }
     if (this.pos.x > halfW) { this.pos.x = halfW; this.vel.x = Math.min(0, this.vel.x) * 0.4; }
     if (this.pos.z < -halfL) { this.pos.z = -halfL; this.vel.z = Math.max(0, this.vel.z) * 0.4; }

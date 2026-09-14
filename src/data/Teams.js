@@ -18,48 +18,56 @@ export const TEAMS = [
     id: 'tidal', name: 'Meridian Tidal', short: 'MER', city: 'Meridian Bay', country: 'Costa Verde',
     colors: { primary: '#0ea5e9', secondary: '#f8fafc', cap: '#0b4a6f', capAlt: '#e2e8f0' },
     prestige: 84, style: 'centre-first', venue: 'meridian-arena',
+    home: { x: 120, y: 640 }, capacity: 4200,
     bio: 'Patient possession side built around a punishing centre forward and a veteran point.',
   },
   {
     id: 'kraken', name: 'Vallhaven Kraken', short: 'VAL', city: 'Vallhaven', country: 'Nordmark',
     colors: { primary: '#14532d', secondary: '#facc15', cap: '#052e16', capAlt: '#fde68a' },
     prestige: 88, style: 'press', venue: 'north-basin',
+    home: { x: 820, y: 90 }, capacity: 4800,
     bio: 'Relentless full press. They will foul you into a bad decision and sprint the counter.',
   },
   {
     id: 'solaris', name: 'Solaris Marina', short: 'SOL', city: 'Porto Solaris', country: 'Adriana',
     colors: { primary: '#f97316', secondary: '#1e293b', cap: '#7c2d12', capAlt: '#fed7aa' },
     prestige: 86, style: 'drive-heavy', venue: 'solaris-lido',
+    home: { x: 980, y: 560 }, capacity: 4600,
     bio: 'Outdoor Mediterranean club. Constant driving, quick releases, chaotic in the best way.',
   },
   {
     id: 'atlas', name: 'Atlas Delfines', short: 'ATL', city: 'Ciudad Atlas', country: 'Marena',
     colors: { primary: '#7c3aed', secondary: '#f5f3ff', cap: '#3b0764', capAlt: '#ddd6fe' },
     prestige: 82, style: 'perimeter', venue: 'meridian-arena',
+    home: { x: 520, y: 880 }, capacity: 4000,
     bio: 'Perimeter shooting team. Skip shots from six metres and a goalkeeper who starts counters.',
   },
   {
     id: 'lanterns', name: 'Harbourgate Lanterns', short: 'HBG', city: 'Harbourgate', country: 'Albion Reach',
     colors: { primary: '#dc2626', secondary: '#fef2f2', cap: '#7f1d1d', capAlt: '#fecaca' },
     prestige: 79, style: 'controlled-tempo', venue: 'harbourgate-baths',
+    home: { x: 180, y: 120 }, capacity: 3600,
     bio: 'Old club, small pool, brutal discipline. Nobody enjoys visiting Harbourgate.',
   },
   {
     id: 'aurora', name: 'Aurora Cascade', short: 'AUR', city: 'Cascade City', country: 'Nordmark',
     colors: { primary: '#06b6d4', secondary: '#0f172a', cap: '#164e63', capAlt: '#a5f3fc' },
     prestige: 81, style: 'counter', venue: 'north-basin',
+    home: { x: 940, y: 210 }, capacity: 3800,
     bio: 'Built for transition. Two of the fastest first-stroke swimmers in the league.',
   },
   {
     id: 'obsidian', name: 'Obsidian Coast', short: 'OBS', city: 'Blackreef', country: 'Costa Verde',
     colors: { primary: '#334155', secondary: '#fbbf24', cap: '#0f172a', capAlt: '#fde68a' },
     prestige: 77, style: 'zone', venue: 'harbourgate-baths',
+    home: { x: 260, y: 700 }, capacity: 3400,
     bio: 'Zone defence specialists who concede the low-value shot and dare you to take it.',
   },
   {
     id: 'zephyr', name: 'Zephyr Union', short: 'ZEP', city: 'Windmere', country: 'Albion Reach',
     colors: { primary: '#65a30d', secondary: '#fafaf9', cap: '#365314', capAlt: '#d9f99d' },
     prestige: 75, style: 'utility', venue: 'solaris-lido',
+    home: { x: 60, y: 240 }, capacity: 3200,
     bio: 'A squad of utility athletes. No stars, no weaknesses, endless substitutions.',
   },
 ];
@@ -237,4 +245,19 @@ export function defaultLineup(roster) {
     if (!chosen.includes(p)) chosen.push(p);
   }
   return [gk, ...chosen.slice(0, 6)];
+}
+
+/**
+ * Straight-line distance in kilometres between two clubs' home cities.
+ *
+ * AQUAPIX's geography is invented, but it is CONSISTENT: the same two clubs are
+ * always the same distance apart, clubs in the same country are close, and a
+ * fixture across the map genuinely costs more to travel to than a local derby.
+ * That is what makes the travel budget a real thing to plan around.
+ */
+export function distanceKm(teamA, teamB) {
+  const a = typeof teamA === 'string' ? TEAMS.find((t) => t.id === teamA) : teamA;
+  const b = typeof teamB === 'string' ? TEAMS.find((t) => t.id === teamB) : teamB;
+  if (!a?.home || !b?.home) return 0;
+  return Math.round(Math.hypot(a.home.x - b.home.x, a.home.y - b.home.y));
 }

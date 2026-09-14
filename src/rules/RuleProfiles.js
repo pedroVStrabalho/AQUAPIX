@@ -51,7 +51,7 @@ const BASE = {
     secondaryPossession: 18,
     exclusionSeconds: 18,
     // Time added to the game clock for dead-ball presentation, per restart type.
-    restartDelay: { goal: 3.0, ordinary: 0.9, exclusion: 2.2, penalty: 4.0, neutral: 1.2 },
+    restartDelay: { goal: 2.2, ordinary: 0.35, exclusion: 1.2, penalty: 2.5, neutral: 0.6 },
   },
 
   // --- Discipline ----------------------------------------------------------
@@ -118,6 +118,27 @@ export const WORLD_AQUATICS_2026 = makeProfile({
   effectiveDate: '2026-02-01',
 });
 
+
+/**
+ * ARCADE - the default for playing. Four short periods, a snappy possession
+ * clock and quick restarts, so a full match is about five minutes: long enough
+ * to feel like a match, short enough to immediately play another.
+ */
+export const ARCADE = makeProfile({
+  id: 'arcade',
+  name: 'Arcade (5 min match)',
+  governingBody: 'AQUAPIX',
+  effectiveDate: '2026-01-01',
+  timing: {
+    periodSeconds: 60,
+    normalPossession: 20,
+    secondaryPossession: 14,
+    exclusionSeconds: 12,
+    intervalSeconds: 6,
+    halftimeSeconds: 10,
+  },
+});
+
 /** Shorter periods for pick-up matches. Every other rule is identical. */
 export const QUICK_MATCH_6MIN = makeProfile({
   id: 'quick-6',
@@ -156,6 +177,7 @@ export const YOUTH_U16 = makeProfile({
 });
 
 export const PROFILES = {
+  [ARCADE.id]: ARCADE,
   [WORLD_AQUATICS_2026.id]: WORLD_AQUATICS_2026,
   [QUICK_MATCH_6MIN.id]: QUICK_MATCH_6MIN,
   [QUICK_MATCH_4MIN.id]: QUICK_MATCH_4MIN,

@@ -198,8 +198,11 @@ export function markingSpot(attacker, defendAtDir, profile, scheme, isCentre) {
     // Fronting: get between the ball and the centre, on the ball side.
     return { x: attacker.pos.x * 0.85, z: attacker.pos.z - defendAtDir * -0.55 };
   }
+  // Bias the marking spot toward the defender's own side of the pool so six
+  // defenders never stack on top of each other when the attack is narrow.
+  const widen = clamp(attacker.pos.x, -6, 6) * 0.25;
   return {
-    x: attacker.pos.x + toGoal.x * (tight + sag * 0.4),
+    x: attacker.pos.x + toGoal.x * (tight + sag * 0.4) + widen,
     z: attacker.pos.z + toGoal.z * (tight + sag),
   };
 }

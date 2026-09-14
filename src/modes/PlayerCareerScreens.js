@@ -31,7 +31,7 @@ registerScreen('playerCreate', (game, params, mgr) => shell('Create Your Player'
     const resume = el('div', 'menu-list');
     resume.appendChild(menuItem('Continue Your Career',
       `${saved.me.name} · ${TEAMS.find((t) => t.id === saved.clubId)?.name} · season ${saved.season}`,
-      'Saved', () => game.resumePlayerCareer(saved)));
+      null, () => game.resumePlayerCareer(saved)));
     body.appendChild(resume);
   }
 
