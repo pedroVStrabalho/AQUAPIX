@@ -192,7 +192,7 @@ export class ContactSystem {
     const grabIntent = clamp01(
       eng.impeding * (0.55 + 0.45 * closing) *
       lerp(1.35, 0.55, legalSkill) *
-      lerp(1.25, 0.7, b.freshness)
+      lerp(1.3, 0.95, b.freshness)
     );
 
     // Contact on the player actually holding the ball is largely legal - you may
@@ -201,12 +201,12 @@ export class ContactSystem {
     // The subtracted term is the "letting go" rate: a defender must keep working
     // at it for the hold to register as illegal, and it decays the moment they
     // stop. Sustained contact of about a second is what draws the whistle.
-    eng.holding = clamp01(eng.holding + (holdRate - 0.16) * dt * 2.4);
+    eng.holding = clamp01(eng.holding + (holdRate - 0.13) * dt * 2.6);
 
     // Sinking: pushing an opponent under. Detected as downward pressure while the
     // opponent is trying to elevate.
     const sinkRate = clamp01((a.elevation < 0.08 ? 1 : 0.25) * grabIntent * (b.elevation > 0.10 ? 1 : 0.5));
-    eng.sinking = clamp01(eng.sinking + (sinkRate - 0.22) * dt * 1.8);
+    eng.sinking = clamp01(eng.sinking + (sinkRate - 0.16) * dt * 2.1);
 
     const severityNow = clamp01(
       eng.holding * 0.62 + eng.sinking * 0.5 + eng.impeding * 0.28 * (aHasBall ? 0.35 : 1)
@@ -220,7 +220,7 @@ export class ContactSystem {
 
   /** Steps 7-15: classify, apply advantage, check visibility, whistle. */
   _classify(eng, ball, ctx) {
-    if (eng.cooldown > 0 || eng.severity < 0.42) return null;
+    if (eng.cooldown > 0 || eng.severity < 0.425) return null;
     const { a, b } = eng;
     const f = ctx.profile.field;
 
@@ -254,7 +254,7 @@ export class ContactSystem {
     let type = FOUL.ORDINARY;
     let reason = 'impeding a player not holding the ball';
 
-    const majorHold = (eng.holding > 0.55 || eng.sinking > 0.5) && !eng.aHasBall;
+    const majorHold = (eng.holding > 0.60 || eng.sinking > 0.54) && !eng.aHasBall;
     if (majorHold) {
       type = FOUL.EXCLUSION;
       reason = eng.sinking > eng.holding ? 'sinking an opponent not holding the ball'

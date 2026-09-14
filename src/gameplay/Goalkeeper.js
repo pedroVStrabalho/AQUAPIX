@@ -314,7 +314,7 @@ export function attemptSave(gk, ball, brain, rng, opts = {}) {
   // more often than a set shot of the same quality would.
   const scrambling = clamp01((brain?.beaten ?? 0) / 0.85);
   const saveChance = clamp01(
-    lerp(0.33, 0.97, readiness) * lerp(0.85, 1.12, control) * lerp(1, 0.18, scrambling)
+    lerp(0.50, 0.97, readiness) * lerp(0.85, 1.12, control) * lerp(1, 0.18, scrambling)
   );
 
   const roll = rng.next();
