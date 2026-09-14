@@ -328,23 +328,58 @@ export class PixelRenderer {
     const ctx = this.ctx;
     const f = this.sim.profile.field;
     const halfL = f.length / 2;
+
     for (const sgn of [1, -1]) {
-      const left = this.worldToScreen(-f.goalWidth / 2, sgn * halfL);
-      const right = this.worldToScreen(f.goalWidth / 2, sgn * halfL);
-      const y = snap(left.sy);
-      const x0 = snap(Math.min(left.sx, right.sx)), x1 = snap(Math.max(left.sx, right.sx));
-      // Net (behind the line, i.e. further from centre).
-      const netDir = y < this.ah / 2 ? -1 : 1;
+      const a = this.worldToScreen(-f.goalWidth / 2, sgn * halfL);
+      const b = this.worldToScreen(f.goalWidth / 2, sgn * halfL);
+
+      // Which way is "behind the goal line"? Derived from the transform rather
+      // than assumed, so this draws correctly whatever orientation the pool is
+      // rendered in - the old version hard-coded a horizontal crossbar and
+      // became an invisible tick the moment the view was turned landscape.
+      const mid = this.worldToScreen(0, sgn * halfL);
+      const centre = this.worldToScreen(0, 0);
+      let ox = mid.sx - centre.sx, oy = mid.sy - centre.sy;
+      const ol = Math.hypot(ox, oy) || 1;
+      ox /= ol; oy /= ol;
+
+      const DEPTH = 8;                      // how far the net sits behind the line
+      const ax = snap(a.sx), ay = snap(a.sy);
+      const bx = snap(b.sx), by = snap(b.sy);
+      const nax = snap(ax + ox * DEPTH), nay = snap(ay + oy * DEPTH);
+      const nbx = snap(bx + ox * DEPTH), nby = snap(by + oy * DEPTH);
+
+      // Net: a filled pocket behind the line, with a light mesh over it.
       ctx.fillStyle = PAL.goalNet;
-      ctx.fillRect(x0, y + (netDir < 0 ? -6 : 1), x1 - x0, 6);
-      ctx.strokeStyle = 'rgba(220,235,245,0.25)';
+      ctx.beginPath();
+      ctx.moveTo(ax, ay); ctx.lineTo(bx, by);
+      ctx.lineTo(nbx, nby); ctx.lineTo(nax, nay);
+      ctx.closePath(); ctx.fill();
+
+      ctx.strokeStyle = 'rgba(220,235,245,0.30)';
       ctx.lineWidth = 1;
-      for (let x = x0; x <= x1; x += 3) { ctx.beginPath(); ctx.moveTo(x + 0.5, y + (netDir < 0 ? -6 : 0)); ctx.lineTo(x + 0.5, y + (netDir < 0 ? 0 : 6)); ctx.stroke(); }
-      // Posts and crossbar (bright).
+      const steps = 6;
+      for (let i = 0; i <= steps; i++) {
+        const t = i / steps;
+        const px = ax + (bx - ax) * t, py = ay + (by - ay) * t;
+        ctx.beginPath();
+        ctx.moveTo(px + 0.5, py + 0.5);
+        ctx.lineTo(px + ox * DEPTH + 0.5, py + oy * DEPTH + 0.5);
+        ctx.stroke();
+      }
+
+      // Crossbar: the goal mouth itself, bright and unmistakable.
+      ctx.strokeStyle = PAL.goalPost;
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.moveTo(ax + 0.5, ay + 0.5);
+      ctx.lineTo(bx + 0.5, by + 0.5);
+      ctx.stroke();
+
+      // Posts: chunky blocks at each end so the mouth reads at a glance.
       ctx.fillStyle = PAL.goalPost;
-      ctx.fillRect(x0 - 1, y - 1, 3, 3);
-      ctx.fillRect(x1 - 1, y - 1, 3, 3);
-      ctx.fillRect(x0, y, x1 - x0, 2);
+      ctx.fillRect(ax - 2, ay - 2, 5, 5);
+      ctx.fillRect(bx - 2, by - 2, 5, 5);
     }
   }
 

@@ -99,3 +99,20 @@ test('the controls are not rotated relative to the picture', async () => {
   assert.ok(Math.abs(there.sy - here.sy) < Math.abs(there.sx - here.sx),
     'and mostly horizontally, not vertically');
 });
+
+test('the goals are drawn across the mouth, not along the goal line', () => {
+  const { r, sim } = renderer();
+  const f = sim.profile.field;
+  // The goal mouth spans the pool's WIDTH (world x) at each end (world z).
+  const a = r.worldToScreen(-f.goalWidth / 2, f.length / 2);
+  const b = r.worldToScreen(f.goalWidth / 2, f.length / 2);
+  const span = Math.hypot(a.sx - b.sx, a.sy - b.sy);
+  assert.ok(span > 6, `the goal mouth has real on-screen size (${span.toFixed(1)}px)`);
+
+  // "Behind the goal" must point away from the centre of the pool, or the net
+  // would be drawn inside the field of play.
+  const mid = r.worldToScreen(0, f.length / 2);
+  const centre = r.worldToScreen(0, 0);
+  const outward = Math.hypot(mid.sx - centre.sx, mid.sy - centre.sy);
+  assert.ok(outward > 1, 'the goal sits away from the centre spot');
+});

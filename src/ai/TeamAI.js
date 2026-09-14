@@ -683,7 +683,7 @@ export class TeamAI {
     // front of the cage was worth no more than an ordinary set shot - which is
     // why second chances were converting worse than first ones.
     const goalDist = Math.hypot(p.pos.x, goalZ - p.pos.z);
-    const putBack = goalDist < 4.5 && (gk ? (sim.gkBrain[gk.side]?.beaten ?? 0) > 0.15 : false);
+    const putBack = goalDist < 6.0 && (gk ? (sim.gkBrain[gk.side]?.beaten ?? 0) > 0.10 : false);
     const settled = putBack || !p.justCaught || p.justCaught < 0.34;
     // A shot is worth taking if it is decent, or if the clock is dying (a
     // desperation shot beats a shot-clock turnover). If the chosen shot is not

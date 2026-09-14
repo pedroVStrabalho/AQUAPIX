@@ -314,7 +314,7 @@ export function attemptSave(gk, ball, brain, rng, opts = {}) {
   // more often than a set shot of the same quality would.
   const scrambling = clamp01((brain?.beaten ?? 0) / 0.85);
   const saveChance = clamp01(
-    lerp(0.20, 0.97, readiness) * lerp(0.85, 1.12, control) * lerp(1, 0.22, scrambling)
+    lerp(0.33, 0.97, readiness) * lerp(0.85, 1.12, control) * lerp(1, 0.18, scrambling)
   );
 
   const roll = rng.next();
@@ -338,7 +338,7 @@ export function attemptSave(gk, ball, brain, rng, opts = {}) {
     // A fumble drops in front of the keeper - that is what a put-back is. It
     // still carries OUTWARD so it can never cross the line, but flinging it
     // clear at half speed removed every second chance from the game.
-    const speed = ball.speed * 0.18;
+    const speed = ball.speed * 0.12;
     // "Uncontrolled" means the keeper cannot choose WHERE it goes - not that it
     // goes into their own goal. The outward z is forced: a hand on the ball
     // always kills its momentum toward the line. Letting this component stay
