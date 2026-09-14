@@ -17,6 +17,14 @@ import { laneOpenness } from './Actions.js';
 
 const a01 = (v) => clamp01((v - 10) / 85);
 
+/**
+ * How a save breaks down once the keeper gets a hand to the ball.
+ * The remainder of the distribution is a rebound spilled in front of the goal.
+ */
+const SAVE_TIP_OVER = 0.17;   // tipped over the bar / round the post -> corner
+const SAVE_HELD = 0.56;       // caught and held -> play resumes
+const SAVE_PARRY = 0.13;      // pushed wide, still in play
+
 export const GK_PROFILE = {
   ASSISTED: 'assisted',   // AI positions, user influences major reactions
   HYBRID: 'hybrid',       // AI holds stance and angle, user times the block
@@ -314,7 +322,7 @@ export function attemptSave(gk, ball, brain, rng, opts = {}) {
   // more often than a set shot of the same quality would.
   const scrambling = clamp01((brain?.beaten ?? 0) / 0.85);
   const saveChance = clamp01(
-    lerp(0.50, 0.97, readiness) * lerp(0.85, 1.12, control) * lerp(1, 0.18, scrambling)
+    lerp(0.62, 0.98, readiness) * lerp(0.85, 1.12, control) * lerp(1, 0.18, scrambling)
   );
 
   const roll = rng.next();
@@ -323,18 +331,31 @@ export function attemptSave(gk, ball, brain, rng, opts = {}) {
   const nl = Math.hypot(n.x, n.y, n.z) || 1;
   n.x /= nl; n.y /= nl; n.z /= nl;
 
-  if (roll < saveChance * 0.55) {
-    outcome = 'controlled';   // keeper holds it
+  // A keeper who gets a hand to the ball has three honest outcomes: hold it,
+  // spill it in front (a put-back chance), or tip it over the line for a corner.
+  // Holding is by far the most common - a corner is what happens when the save
+  // is good but not clean.
+  if (roll < saveChance * SAVE_TIP_OVER) {
+    outcome = 'tipped';       // over the bar / round the post: corner throw
+    // Backwards over the line, and clearly OVER the crossbar. The height has to
+    // be unambiguous: a tip that crosses at bar height is an own goal, which is
+    // the one outcome a save must never produce.
+    vel = { x: n.x * 1.4, y: 2.2, z: -outward * 5.4 };
+  } else if (roll < saveChance * (SAVE_TIP_OVER + SAVE_HELD)) {
+    outcome = 'controlled';   // keeper holds it, play resumes
     vel = { x: 0, y: 0, z: 0 };
-  } else if (roll < saveChance * 0.85) {
-    outcome = 'parry';        // directed deflection
+  } else if (roll < saveChance * (SAVE_TIP_OVER + SAVE_HELD + SAVE_PARRY)) {
+    outcome = 'parry';        // directed deflection, pushed wide
     const speed = ball.speed * lerp(0.22, 0.42, 1 - control);
     // A controlled keeper parries wide and away from the danger zone.
     const wide = Math.sign(dx || rng.range(-1, 1));
     const dirX = lerp(n.x, wide, lerp(0.2, 0.85, a01(attr.reboundControl)));
     vel = { x: dirX * speed, y: Math.abs(n.y) * speed * 0.8 + 1.5, z: outward * speed * 0.7 };
   } else if (roll < saveChance) {
-    outcome = 'deflection';   // uncontrolled: anywhere, but never backwards
+    // The remainder of every save. These four bands MUST cover the whole of
+    // saveChance: when they only reached 85%, the missing slice silently became
+    // "beaten" and long-range shots started going in again.
+    outcome = 'deflection';   // uncontrolled fumble in front of the goal
     // A fumble drops in front of the keeper - that is what a put-back is. It
     // still carries OUTWARD so it can never cross the line, but flinging it
     // clear at half speed removed every second chance from the game.

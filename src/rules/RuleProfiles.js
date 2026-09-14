@@ -130,9 +130,12 @@ export const ARCADE = makeProfile({
   governingBody: 'AQUAPIX',
   effectiveDate: '2026-01-01',
   timing: {
+    // Periods are short, but the possession clock is the REAL rule: 28 seconds
+    // for a normal attack, 18 after an exclusion, a corner, or the attacking
+    // team recovering its own shot.
     periodSeconds: 60,
-    normalPossession: 20,
-    secondaryPossession: 14,
+    normalPossession: 28,
+    secondaryPossession: 18,
     exclusionSeconds: 12,
     intervalSeconds: 6,
     halftimeSeconds: 10,

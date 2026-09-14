@@ -81,6 +81,7 @@ export class Ball {
     this.holder = null;
     this.timeSinceLoose = 0;
     this.saveAttempted = false;   // one save attempt per shot, not one per frame
+    this.exitVelZ = 0;            // velocity along z at the moment it left play
     this.blockTriedBy = new Set();// one block attempt per defender per shot
     this.kind = kind;
     this._skipped = false;
@@ -282,6 +283,11 @@ export class Ball {
     // --- Goal lines / end walls (ball out of play) -------------------------
     if (this.pos.z < -halfL + r || this.pos.z > halfL - r) {
       const sign = Math.sign(this.pos.z);
+      // Remember which way the ball was actually travelling BEFORE the wall
+      // bounce reverses it. The rules need to know whether the ball was leaving
+      // the field or coming back into it, and reading vel.z after the bounce
+      // gives exactly the wrong answer.
+      this.exitVelZ = this.vel.z;
       // Keep it physically inside; the rules engine decides corner vs goal throw.
       this.pos.z = sign * (halfL - r);
       this.vel.z *= -0.4;

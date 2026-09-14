@@ -105,6 +105,7 @@ export class MatchSim {
     this.clockRunning = false;
     this.clockNow = 0;             // monotonic simulation time
     this.shotClock = this.profile.timing.normalPossession;
+    this.shotClockArmed = false;
     this.shotClockSecondary = false;
     this.possession = null;
     this.score = { home: 0, away: 0 };
@@ -303,7 +304,10 @@ export class MatchSim {
     // ---- Clocks -----------------------------------------------------------
     if (this.clockRunning) {
       this.gameClock = Math.max(0, this.gameClock - dt);
-      if (!swimOff && this.possession) {
+      // The shot clock only runs once the team in possession has actually
+      // touched the ball. It used to start the instant possession changed, so a
+      // team was already losing time while the ball was still travelling to them.
+      if (!swimOff && this.possession && this.shotClockArmed) {
         this.shotClock = Math.max(0, this.shotClock - dt);
         if (this.shotClock <= 0) {
           this._turnover(this.opponentSide(this.possession), 'shotClockExpired');
@@ -754,6 +758,8 @@ export class MatchSim {
     athlete.justCaught = 0.55;
     athlete.pumpFakes = 0;
     if (this.possession !== athlete.side) this._setPossession(athlete.side, POSSESSION_EVENT.GAIN);
+    // Touching the ball is what starts your shot clock.
+    if (athlete.side === this.possession) this.shotClockArmed = true;
   }
 
   _resolveLooseBall(dt) {
@@ -888,7 +894,30 @@ export class MatchSim {
       this.bus.emit('save', { gk, outcome: res.outcome });
       this._timeline(`Save - #${gk.player.capNumber} ${gk.player.name} (${res.outcome}).`);
 
-      if (res.outcome === 'controlled') {
+      if (res.outcome === 'tipped') {
+        // Over the bar or round the post. It leaves play off the keeper's hand,
+        // which is exactly what a corner throw is for.
+        // Launched from ABOVE the crossbar - the keeper tips it over with a
+        // raised hand. Starting it high is what makes this unambiguously a
+        // corner rather than a ball scraping under the bar into their own net.
+        const barY = this.profile.field.goalHeight + 0.35;
+        // Drive it out in proportion to how far off the line the keeper is, so
+        // the ball always clears - a keeper who had come out was tipping it into
+        // the water short of the line, and the "corner" never happened.
+        const toLine = Math.abs(gk.pos.z - gz);
+        const back = Math.max(5, toLine * 7);
+        const tipVel = { ...res.vel, z: Math.sign(gz - gk.pos.z) * back };
+        // A keeper who has just punched the ball away cannot turn round and
+        // catch it again. Without this they re-gathered their own tip before it
+        // crossed, and the corner never happened.
+        gk.catchCooldown = Math.max(gk.catchCooldown, 0.7);
+        brain.beaten = Math.max(brain.beaten, 0.5);
+        this.ball.launch(
+          { x: this.ball.pos.x, y: Math.max(barY, this.ball.pos.y), z: this.ball.pos.z },
+          tipVel, { x: 0, y: 0, z: 0 }, 'deflection', gk
+        );
+        this.ball.eventFlags.splash = 0.4;
+      } else if (res.outcome === 'controlled') {
         this._giveBall(gk);
         const ev = shotClockAfter(this.profile, POSSESSION_EVENT.GAIN);
         this._applyShotClock(ev);
@@ -929,6 +958,14 @@ export class MatchSim {
   _onEndLine(ball, sign) {
     if (!this.isLive()) return;
     if (ball.timeSinceLoose < 0.05) return;
+    // A ball in someone's hands has not gone anywhere.
+    if (ball.holder) return;
+    // The ball must actually be LEAVING the field across this line. The keeper
+    // stands within a few centimetres of their own goal line, so an outlet pass
+    // is released from behind it and was instantly judged to have gone out -
+    // handing the attack a corner nearly every time the keeper touched the ball.
+    // A ball travelling back into play has not gone out, wherever it started.
+    if (Math.sign(ball.exitVelZ ?? ball.vel.z) !== sign) return;
     const defendingSide = this.attackDir.home === sign ? 'away' : 'home';
     const decision = endLineRestart(this.profile, ball.lastTouchSide, defendingSide, ball.pos.x);
     const f = this.profile.field;
@@ -1232,10 +1269,23 @@ export class MatchSim {
     this.stats[prev].turnovers++;
     if (this.ball.holder) this.ball.holder.stats.turnovers++;
 
+    // The ball stays where the turnover happened and is picked up by the nearest
+    // opponent. It used to be teleported the length of the pool to the new
+    // team's goalkeeper, which handed them a free restart and wiped out any
+    // counterattack the turnover had just created.
     const f = this.profile.field;
-    const gk = this.goalkeeperFor(toSide);
-    const spotZ = -this.attackDir[toSide] * (f.length / 2 - 1.2);
-    this._beginRestart(toSide, { x: clamp(this.ball.pos.x, -4, 4), z: spotZ }, POSSESSION_EVENT.GAIN, null, gk);
+    const halfW = f.width / 2 - 0.4;
+    const halfL = f.length / 2 - 0.4;
+    const spot = {
+      x: clamp(this.ball.pos.x, -halfW, halfW),
+      z: clamp(this.ball.pos.z, -halfL, halfL),
+    };
+    const takers = this.activeAthletes(toSide).filter((a) => !a.isGoalkeeper && a.inPool);
+    const taker = takers.sort((a, b) =>
+      Math.hypot(a.pos.x - spot.x, a.pos.z - spot.z) -
+      Math.hypot(b.pos.x - spot.x, b.pos.z - spot.z))[0]
+      ?? this.goalkeeperFor(toSide);
+    this._beginRestart(toSide, spot, POSSESSION_EVENT.GAIN, null, taker);
     this._openTransition(toSide);
   }
 
@@ -1243,6 +1293,7 @@ export class MatchSim {
     if (this.possession === side) return;
     const previous = this.possession;
     this.possession = side;
+    this.shotClockArmed = false;   // re-armed when this team touches the ball
     this.roleDirty = true;
     if (previous) this._tickExclusions(0, { possessionRegained: side });
     this.bus.emit('possession', { side, previous, event });

@@ -191,11 +191,14 @@ test('a shot from half court is not a realistic way to score', () => {
 
     const before = sim.score.home;
     sim.tryShot(shooter, { x: 0.7, y: 0.45 }, 'power', 1);
-    for (let i = 0; i < 150; i++) sim.update(1 / 60);
+    // Only the SHOT itself. Beyond about a second any goal is a put-back off
+    // the rebound, which is a different thing entirely - and with every other
+    // athlete parked out of the way the shooter would collect it unopposed.
+    for (let i = 0; i < 60; i++) sim.update(1 / 60);
     if (sim.score.home > before) goals++;
   }
   const rate = goals / trials;
-  assert.ok(rate < 0.25, `half-court shots rarely go in (${(rate * 100).toFixed(0)}%)`);
+  assert.ok(rate < 0.25, `half-court shots rarely beat the keeper (${(rate * 100).toFixed(0)}%)`);
 });
 
 test('close-range shooting beats long-range shooting', () => {
