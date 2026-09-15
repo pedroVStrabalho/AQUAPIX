@@ -53,9 +53,30 @@ class Game {
 
     window.addEventListener('resize', () => this.renderer?.resize());
     requestAnimationFrame(this._frame);
+    this._installAutosave();
   }
 
   bootMenu() { this.canvas.style.opacity = '0'; this.screens.show('main'); }
+
+  /**
+   * Never lose a career to a closed tab.
+   *
+   * Progress is saved at every meaningful action, but a browser can be closed
+   * between two of them. `pagehide` and `visibilitychange` are the two events
+   * that reliably fire when a tab is closed, hidden, or backgrounded on mobile,
+   * so both careers are flushed there as a safety net. Everything lives in this
+   * browser's localStorage - no account, no server, same device.
+   */
+  _installAutosave() {
+    const flush = () => {
+      try { this.saveCareer(); } catch { /* a full or blocked store is not fatal */ }
+      try { this.savePlayerCareer(); } catch { /* ditto */ }
+    };
+    window.addEventListener('pagehide', flush);
+    window.addEventListener('visibilitychange', () => { if (document.hidden) flush(); });
+    // Belt and braces for browsers that skip pagehide.
+    window.addEventListener('beforeunload', flush);
+  }
 
   applySettings() {
     saveJson(SAVE_SETTINGS, this.settings);

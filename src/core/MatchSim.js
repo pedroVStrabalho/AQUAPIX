@@ -801,17 +801,17 @@ export class MatchSim {
       // hand in the lane, not merely be in the neighbourhood.
       const isPass = b.kind === 'pass';
       const opponentOfPasser = isPass && b.lastHolder && b.lastHolder.side !== a.side;
-      const intercept = opponentOfPasser ? 0.55 : 1;
+      const intercept = opponentOfPasser ? 0.40 : 1;
       // Now that the AI holds a real formation, passes cover water polo
       // distances instead of the one metre between two players in a scrum. The
       // receiver's advantage has to cover that range or two thirds of all
       // possessions end in a turnover.
       const window = ((a.isGoalkeeper ? 0.55 : 0.42) * (a === this.userAthlete ? this.assist.catchWindow : 1) +
         a.reach * 0.42 + a.elevation * 0.35 + swim * 0.35 * lerp(0.6, 1, a.freshness)) * intercept +
-        (isTarget ? 0.55 : 0);
+        (isTarget ? 1.05 : 0);
       if (d < window) {
         // Score by how comfortably they reach it, so the swimmer with margin wins.
-        const score = (window - d) + swim * 0.25 + (isTarget ? 0.6 : 0);
+        const score = (window - d) + swim * 0.25 + (isTarget ? 1.3 : 0);
         if (score > bestScore) { bestScore = score; best = a; }
       }
     }
@@ -854,15 +854,20 @@ export class MatchSim {
       }
       this.bus.emit('catch', { athlete: best, outcome: result.outcome });
     } else if (result.outcome === 'bobble' || result.outcome === 'deflection') {
-      // Knock it away rather than take it cleanly.
+      // A fumble, not a clearance. The ball pops up at the receiver's own hands
+      // and they get the first chance at it. Sending it 3.4 m/s in a random
+      // direction and then locking the receiver out for a third of a second
+      // handed it straight to whoever was marking them: measured, 80% of all
+      // possessions lost from a pass were opponents collecting these, not
+      // genuine interceptions.
       const away = this.rng.range(0, Math.PI * 2);
-      const s = result.outcome === 'deflection' ? 3.4 : 1.6;
+      const s = result.outcome === 'deflection' ? 1.2 : 0.55;
       b.launch(
         { x: b.pos.x, y: Math.max(0.15, b.pos.y), z: b.pos.z },
-        { x: Math.sin(away) * s, y: 1.2, z: Math.cos(away) * s },
+        { x: Math.sin(away) * s, y: 0.9, z: Math.cos(away) * s },
         { x: 0, y: 0, z: 0 }, 'deflection', best
       );
-      best.catchCooldown = 0.35;
+      best.catchCooldown = 0.10;
       b.eventFlags.splash = 0.5;
     } else if (result.outcome === 'drop') {
       best.catchCooldown = 0.42;
@@ -1327,8 +1332,10 @@ export class MatchSim {
     // lead was invisible.
     const aim = target.pos
       ? (() => {
-          const flight = Math.hypot(target.pos.x - passer.pos.x, target.pos.z - passer.pos.z) / 11;
-          const t = Math.min(flight, 0.9);
+          const throwSpeed = lerp(8.5, 15, clamp01((passer.player.attr.passVelocity - 10) / 85))
+            * (type === PASS_TYPES.LOB ? 0.55 : 1);
+          const flight = Math.hypot(target.pos.x - passer.pos.x, target.pos.z - passer.pos.z) / throwSpeed;
+          const t = Math.min(flight, 1.1);
           return { x: target.pos.x + target.vel.x * t, z: target.pos.z + target.vel.z * t };
         })()
       : target;
@@ -1345,7 +1352,7 @@ export class MatchSim {
     // athlete to the ball the instant it leaves their hand - simply caught it
     // straight back. That is the "I press pass, the ball leaves my hand and
     // comes back" bug, and it hit the AI just as hard as the player.
-    passer.catchCooldown = Math.max(passer.catchCooldown, 0.5);
+    passer.catchCooldown = Math.max(passer.catchCooldown, 0.95);
     passer.stats.passesAttempted++;
     this.stats[passer.side].passesAttempted++;
     this.ball.intendedReceiver = res.receiver;

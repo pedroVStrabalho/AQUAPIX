@@ -260,7 +260,7 @@ export function resolveCatch(receiver, ball, rng, opts = {}) {
 
   // Elite athletes catch almost everything that is thrown at them properly; the
   // interesting failures come from pressure, speed, reach and the weak side.
-  let p = 0.72 + 0.26 * factors.catchSkill;
+  let p = 0.85 + 0.14 * factors.catchSkill;
   p *= lerp(0.70, 1.0, factors.facing);
   p *= lerp(0.82, 1.0, factors.freshness);
   p *= 1 - factors.pressure * 0.38;

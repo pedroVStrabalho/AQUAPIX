@@ -652,6 +652,16 @@ function ordinal(n) {
 // Career screens
 // ===========================================================================
 
+/** Confirm before a saved career is overwritten. */
+function confirmReplaceCareer(saved) {
+  const club = TEAMS.find((t) => t.id === saved.clubId)?.name ?? 'your club';
+  const where = `season ${saved.season}, round ${saved.round + 1}`;
+  if (typeof globalThis.confirm !== 'function') return true;
+  return globalThis.confirm(
+    `Start a new career?\n\nYour saved career with ${club} (${where}) will be permanently replaced.`
+  );
+}
+
 registerScreen('careerSetup', (game, params, mgr) => shell('Coach Career', (body) => {
   body.appendChild(el('p', null, 'Choose the club you will manage. Board expectations follow club prestige.'));
 
@@ -677,7 +687,13 @@ registerScreen('careerSetup', (game, params, mgr) => shell('Coach Career', (body
     exp.textContent = `Board expects: ${t.prestige >= 85 ? 'the title' : t.prestige >= 80 ? 'top three' : t.prestige >= 77 ? 'top five' : 'progress'}`;
     exp.style.color = t.colors.primary;
     card.appendChild(exp);
-    card.addEventListener('click', () => game.startCareer(t.id));
+    card.addEventListener('click', () => {
+      // Starting a new career destroys the saved one. Ask first - a saved career
+      // should survive in this browser until the player deliberately replaces
+      // it, not vanish because they clicked a club to read its description.
+      if (saved && !confirmReplaceCareer(saved)) return;
+      game.startCareer(t.id);
+    });
     grid.appendChild(card);
   }
   body.appendChild(grid);

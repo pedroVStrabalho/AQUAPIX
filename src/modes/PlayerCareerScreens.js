@@ -83,6 +83,16 @@ registerScreen('playerCreate', (game, params, mgr) => shell('Create Your Player'
   const start = el('button', 'btn', 'Begin Career');
   start.addEventListener('click', () => {
     if (!draft.name.trim()) draft.name = 'Alex Marsh';
+    // Same rule as the coach career: a saved player career survives in this
+    // browser until it is deliberately replaced.
+    const prior = game.loadPlayerSave();
+    if (prior && typeof globalThis.confirm === 'function') {
+      const ok = globalThis.confirm(
+        `Start a new player career?\n\nYour saved career as ${prior.name ?? 'your player'} ` +
+        `(season ${prior.season ?? 1}) will be permanently replaced.`
+      );
+      if (!ok) return;
+    }
     game.startPlayerCareer(draft);
   });
   const back = el('button', 'btn ghost', 'Back');

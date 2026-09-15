@@ -716,7 +716,7 @@ export class TeamAI {
           sim.tryShot(p, choice.aim, type, clamp01(0.55 + this.plan.riskTolerance * 0.4 + this.rng.gauss(0, this.diff.error)));
           this.memory.noteShot(p, p.pos, p.pumpFakes > 0);
         }
-      } else if (choice.kind === 'pass' && choice.lane > 0.45) {
+      } else if (choice.kind === 'pass' && choice.lane > 0.58) {
         sim.tryPass(p, choice.target, choice.type, clamp01(0.5 + dist2(p.pos, choice.target.pos) / 22));
         if (choice.type === PASS_TYPES.ENTRY) this.memory.noteCentreEntry(p.pos.x);
       }
