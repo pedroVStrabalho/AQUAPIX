@@ -95,9 +95,10 @@ test('an athlete accelerates through the water rather than snapping to a directi
   assert.ok(samples[1] > 0, 'the athlete starts moving');
   assert.ok(samples[1] < 0.35, 'but does not reach full speed on the first frame');
   assert.ok(samples[59] > samples[9], 'speed builds over the first second');
-  // AQUAPIX is an arcade game: real swimmers do ~2 m/s, which meant 12 seconds to
-  // cross the pool and felt like the controls were dead. Arcade pace is ~3-5 m/s.
-  assert.ok(a.speed > 2.5 && a.speed < 6.0, `arcade sprint speed, got ${a.speed.toFixed(2)}`);
+  // Arcade pace, deliberately eased so the match is readable now that the whole
+  // pool is on screen at once. Real swimmers do ~2 m/s; below that the controls
+  // feel dead, above ~5 the play crosses the screen faster than you can read it.
+  assert.ok(a.speed > 2.1 && a.speed < 5.5, `arcade sprint speed, got ${a.speed.toFixed(2)}`);
 
   // Cut the effort: drag alone must slow the athlete down.
   const top = a.speed;

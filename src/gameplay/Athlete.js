@@ -123,9 +123,9 @@ export class Athlete {
     // eye has to track the entire field at once - at the old pace play crossed
     // the screen faster than a person could read it. Still well above a real
     // swimmer's ~2 m/s, so the controls stay responsive.
-    this.maxSpeed = lerp(2.7, 3.7, a01(a.swimSpeed)) * form;
-    this.accelBase = lerp(6.0, 10.0, a01(a.firstStroke));
-    this.turnBase = lerp(4.5, 7.5, a01(a.changeOfDirection));
+    this.maxSpeed = lerp(2.4, 3.3, a01(a.swimSpeed)) * form;
+    this.accelBase = lerp(5.2, 8.6, a01(a.firstStroke));
+    this.turnBase = lerp(4.0, 6.6, a01(a.changeOfDirection));
     this.maxElevation = lerp(0.34, 0.72, a01(a.legPower) * 0.7 + a01(a.verticalReach) * 0.3);
     this.riseRate = lerp(1.5, 3.4, a01(a.explosiveness) * 0.6 + a01(a.legPower) * 0.4);
     this.enduranceK = lerp(1.35, 0.62, a01(a.endurance));

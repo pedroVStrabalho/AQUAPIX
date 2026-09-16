@@ -191,7 +191,11 @@ export function markingSpot(attacker, defendAtDir, profile, scheme, isCentre) {
   toGoal.x /= len; toGoal.z /= len;
 
   // Pressing defenders sit tight and in front; dropping defenders sag toward goal.
-  const tight = lerp(1.35, 0.55, scheme.pressure);
+  // How much water the defender leaves the attacker. The old range was
+  // 1.35m to 0.55m - so even a "loose" mark was within arm's reach and the
+  // carrier had nowhere to work at any difficulty. A dropping defence now
+  // genuinely drops off.
+  const tight = lerp(2.7, 0.6, scheme.pressure);
   const sag = lerp(0, 2.6, scheme.drop);
 
   if (isCentre && scheme.frontCentre > 0.5) {

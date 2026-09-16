@@ -24,12 +24,24 @@ import { pressureOn, laneOpenness, shotQuality, SHOT_TYPES, PASS_TYPES, contextu
 
 const a01 = (v) => clamp01((v - 10) / 85);
 
+/**
+ * Difficulty never inflates attributes - it changes how quickly the AI reads
+ * play and how tightly it presses.
+ *
+ * `press` is how close the defence lives to the ball carrier: an amateur side
+ * gives you room to swim and think, a legendary one is on your shoulder. It
+ * used to be missing entirely, so every level marked you equally tightly and
+ * the carrier had nowhere to go regardless of the level you picked.
+ *
+ * Reaction times are deliberately longer than a real athlete's across the
+ * board: the player needs a beat to see what is happening and act on it.
+ */
 export const DIFFICULTY = {
-  amateur:      { react: 0.42, recognition: 0.42, error: 0.34, adapt: 0.15, risk: 0.35, gkDiscipline: 0.35, subQuality: 0.35, label: 'Amateur' },
-  club:         { react: 0.30, recognition: 0.58, error: 0.24, adapt: 0.30, risk: 0.45, gkDiscipline: 0.52, subQuality: 0.55, label: 'Club' },
-  national:     { react: 0.20, recognition: 0.74, error: 0.16, adapt: 0.50, risk: 0.55, gkDiscipline: 0.70, subQuality: 0.72, label: 'National' },
-  international:{ react: 0.13, recognition: 0.87, error: 0.10, adapt: 0.72, risk: 0.66, gkDiscipline: 0.85, subQuality: 0.88, label: 'International' },
-  legendary:    { react: 0.08, recognition: 0.96, error: 0.06, adapt: 0.9,  risk: 0.74, gkDiscipline: 0.94, subQuality: 0.95, label: 'Legendary' },
+  amateur:      { react: 0.66, recognition: 0.42, error: 0.34, adapt: 0.15, risk: 0.35, gkDiscipline: 0.35, subQuality: 0.35, press: 0.30, label: 'Amateur' },
+  club:         { react: 0.52, recognition: 0.58, error: 0.24, adapt: 0.30, risk: 0.45, gkDiscipline: 0.52, subQuality: 0.55, press: 0.48, label: 'Club' },
+  national:     { react: 0.40, recognition: 0.74, error: 0.16, adapt: 0.50, risk: 0.55, gkDiscipline: 0.70, subQuality: 0.72, press: 0.64, label: 'National' },
+  international:{ react: 0.30, recognition: 0.87, error: 0.10, adapt: 0.72, risk: 0.66, gkDiscipline: 0.85, subQuality: 0.88, press: 0.82, label: 'International' },
+  legendary:    { react: 0.22, recognition: 0.96, error: 0.06, adapt: 0.9,  risk: 0.74, gkDiscipline: 0.94, subQuality: 0.95, press: 0.97, label: 'Legendary' },
 };
 
 /** Layer 7: opponent tendency memory. Gradual and explainable, never psychic. */
@@ -124,7 +136,14 @@ export class TeamAI {
     // Pressing costs stamina: back off when the squad is cooked.
     const squad = sim.activeAthletes(this.side).filter((p) => !p.isGoalkeeper);
     const avgFresh = squad.reduce((s, p) => s + p.freshness, 0) / Math.max(1, squad.length);
-    this.plan.pressLevel = clamp01(DEFENSIVE_SYSTEMS[this.tactics.defense].pressure * lerp(0.55, 1.1, avgFresh));
+    // Difficulty decides how hard this side presses. Without it every level
+    // marked the carrier equally tightly, so choosing Amateur did nothing to
+    // give the player room.
+    this.plan.pressLevel = clamp01(
+      DEFENSIVE_SYSTEMS[this.tactics.defense].pressure
+      * lerp(0.55, 1.1, avgFresh)
+      * lerp(0.45, 1.15, this.diff.press ?? 0.64)
+    );
 
     // Pull the goalkeeper when it is rational (section 16.4).
     const trigger = this.tactics.triggers.find((t) => t.id === 'pullKeeperLate');
@@ -897,8 +916,13 @@ export class TeamAI {
     // A defender who has arrived at their marking spot would otherwise sit at
     // zero effort and let the carrier swim away from them. Marking the ball is
     // active work: stay with them.
-    if (carrier && carrier.side !== p.side && dist2(p.pos, carrier.pos) < 4.5) {
-      cmd.effort = Math.max(cmd.effort, 0.8);
+    // How hard the defence chases the carrier is a DIFFICULTY setting. A fixed
+    // radius and effort meant an amateur side hounded you exactly as hard as a
+    // legendary one, and the carrier never had room to work.
+    const press = this.diff.press ?? 0.64;
+    if (carrier && carrier.side !== p.side &&
+        dist2(p.pos, carrier.pos) < lerp(2.8, 5.0, press)) {
+      cmd.effort = Math.max(cmd.effort, lerp(0.45, 0.95, press));
     }
     if (d < 0.5) cmd.rise = Math.max(cmd.rise, 0.4);
     return cmd;
