@@ -307,11 +307,11 @@ const SCREENS = {
   controls: (game, params, mgr) => shell('Controls', (body) => {
     const rows = [
       ['W A S D', 'Swim and orient the body', 'Drive, cut, reposition', 'Mark and recover', 'Position in goal'],
-      ['Z', 'Pass', 'Call for the pass', 'Switch controlled defender', 'Short outlet'],
+      ['Z', 'Pass', 'Call for the pass', 'Raise arm / block', 'Short outlet'],
       ['X  (or Space)', 'Shoot', 'Contextual one-touch', 'Timed steal', 'Aggressive save'],
       ['C', 'Lob pass - lofted over a defender', 'Request a lead pass', '-', 'Long outlet'],
       ['Shift', 'Sprint - needs 70% readiness', 'Sprint into space', 'Recovery sprint', 'Explosive rise when set'],
-      ['L', 'Pump fake, skip-shot modifier', 'Call teammate movement', 'Raise arm and block', 'Block modifier'],
+      ['L', 'Pump fake, skip-shot modifier', 'Call teammate movement', 'Raise arm / block (alt)', 'Block modifier'],
       ['Q', 'Protect the ball', 'Tactical modifier', 'Press', 'Defensive command'],
       ['E', 'Switch player', 'Switch player', 'Switch controlled defender', '-'],
       ['G', 'Toggle goalkeeper control', '-', '-', 'Take manual control'],

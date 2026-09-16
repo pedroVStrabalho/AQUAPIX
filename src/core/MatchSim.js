@@ -1490,6 +1490,16 @@ export class MatchSim {
       if (a.blockTimer <= 0 || a.side === this.ball.lastTouchSide) continue;
       const hand = a.handPoint();
       const reach = a.reach * (0.75 + 0.55 * a.armRaised) + a.elevation * 0.4;
+
+      // You can only block a ball that is still coming AT you. The test was a
+      // plain distance sphere, so an arm raised behind the shooter blocked a
+      // shot that had already gone past it - which is not a block, it is the
+      // ball hitting someone in the back of the hand on its way to goal.
+      const toHandX = hand.x - this.ball.pos.x;
+      const toHandZ = hand.z - this.ball.pos.z;
+      const approaching = this.ball.vel.x * toHandX + this.ball.vel.z * toHandZ;
+      if (approaching <= 0) continue;
+
       if (this.ball.distanceTo(hand.x, hand.y + 0.25, hand.z) < reach) {
         // ONE swipe per defender per shot. This used to roll every frame for the
         // 0.55s the arm was up - about thirty rolls - so any defender within

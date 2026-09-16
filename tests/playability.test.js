@@ -270,3 +270,56 @@ test('a full match finishes in a legal, complete state', () => {
   const pkg = sim.statsPackage();
   assert.ok(pkg.home && pkg.away, 'a stats package is produced for both sides');
 });
+
+test('a raised arm only blocks a ball that is still coming at it', () => {
+  // The block used to be a plain distance sphere, so a defender BEHIND the
+  // shooter blocked shots that had already gone past them.
+  const attempt = (inFront) => {
+    let blocks = 0;
+    const trials = 40;
+    for (let t = 0; t < trials; t++) {
+      const sim = new MatchSim({
+        profile: getProfile('arcade'), league, homeId: 'tidal', awayId: 'kraken',
+        seed: 900 + t, difficulty: 'national', assist: ASSIST_PROFILE.STANDARD,
+        refereeProfile: 'standard', userSide: null,
+      });
+      sim.start();
+      for (let i = 0; i < 180; i++) sim.update(1 / 60);
+
+      const shooter = sim.activeAthletes('home').find((a) => !a.isGoalkeeper);
+      const gz = shooter.attackDir * (sim.profile.field.length / 2);
+      for (const s of ['home', 'away']) {
+        for (const a of sim.activeAthletes(s)) {
+          if (a === shooter) continue;
+          a.pos.x = 9; a.pos.z = -shooter.attackDir * 11; a.vel.set(0, 0);
+        }
+      }
+      shooter.pos.x = 0;
+      shooter.pos.z = gz - shooter.attackDir * 7;
+      shooter.vel.set(0, 0);
+
+      const def = sim.activeAthletes('away').find((a) => !a.isGoalkeeper);
+      def.pos.x = 0;
+      def.pos.z = shooter.pos.z + shooter.attackDir * (inFront ? 1.0 : -1.0);
+      def.vel.set(0, 0);
+      def.elevation = 0.6;
+      def.armRaised = 1;
+      sim.tryBlock(def);
+
+      sim._giveBall(shooter);
+      shooter.actionLock = 0;
+      shooter.justCaught = 0;
+      const before = sim.stats.away.blocks;
+      sim.tryShot(shooter, { x: 0, y: 0.45 }, 'power', 1);
+      for (let i = 0; i < 60; i++) {
+        sim.update(1 / 60);
+        def.blockTimer = Math.max(def.blockTimer, 0.2);
+      }
+      if (sim.stats.away.blocks > before) blocks++;
+    }
+    return blocks / trials;
+  };
+
+  assert.equal(attempt(false), 0, 'an arm raised BEHIND the shooter never blocks');
+  assert.ok(attempt(true) > 0.1, 'an arm raised in front of the shooter does block');
+});

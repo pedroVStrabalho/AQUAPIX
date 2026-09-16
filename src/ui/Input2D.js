@@ -257,12 +257,14 @@ export class Input2D {
     }
     // Tackle / steal.
     if (this.hit('action1')) sim.trySteal(a);
-    // Block (raise arm).
-    if (this.isDown('action3')) { sim.tryBlock(a); cmd.rise = Math.max(cmd.rise, 0.9); }
+    // Block (raise arm) on Z - the same key that passes when you have the ball.
+    // L still works. Switching defenders lives on E, so Z is free here.
+    if (this.isDown('action2') || this.isDown('action3')) {
+      sim.tryBlock(a);
+      cmd.rise = Math.max(cmd.rise, 0.9);
+    }
     // Contain.
     if (this.isDown('modifier')) cmd.brace = true;
-    // Switch to the best defender (team control only).
-    if (this.hit('action2') && !sim.lockUserAthlete) sim.switchAthlete(sim.userControlsSide, 1);
   }
 
   _goalkeeper(a, cmd, sxin, syin) {

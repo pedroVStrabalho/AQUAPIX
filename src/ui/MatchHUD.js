@@ -168,7 +168,7 @@ export class MatchHUD {
     } else {
       items = touch
         ? [['STEAL', 'tackle'], ['SWITCH', 'nearest']]
-        : [['X', 'Steal'], ['L', 'Block/raise arm'], ['⇧', 'Press'], ...(sim.lockUserAthlete ? [] : [['E', 'Switch player']])];
+        : [['X', 'Steal'], ['Z', 'Raise arm / block'], ['⇧', 'Press'], ...(sim.lockUserAthlete ? [] : [['E', 'Switch player']])];
     }
     this.controls.innerHTML = items.map(([k, d]) => `<span class="mh-ctl"><b>${k}</b>${d}</span>`).join('');
   }

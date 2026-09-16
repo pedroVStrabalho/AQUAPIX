@@ -142,3 +142,18 @@ test('every mapped control key reaches the input layer', () => {
     assert.ok(!input.isDown(action), `${code} clears on release`);
   }
 });
+
+test('Z raises the arm when defending', () => {
+  const { sim, input, frame, me } = withBall(41);
+  // Hand the ball to the other side so our athlete is defending.
+  const theirs = sim.activeAthletes('away').find((a) => !a.isGoalkeeper);
+  sim._giveBall(theirs);
+  sim.setUserAthlete(me);
+  for (let i = 0; i < 5; i++) frame();
+
+  fire('keydown', 'KeyZ');
+  for (let i = 0; i < 5; i++) frame();
+  assert.ok(input.isDown('action2'), 'Z is registering');
+  assert.ok(me.blockTimer > 0, 'holding Z raises the arm to block');
+  fire('keyup', 'KeyZ');
+});
