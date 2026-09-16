@@ -109,7 +109,7 @@ export class ContactSystem {
         eng.severity *= Math.exp(-6 * dt);
         eng.holding *= Math.exp(-6 * dt);
         eng.sinking *= Math.exp(-6 * dt);
-        if (eng.duration <= 0 && eng.severity < 0.02 && eng.cooldown <= 0) this.engagements.delete(k);
+        if (eng.duration <= 0 && eng.severity < 0.545 && eng.cooldown <= 0) this.engagements.delete(k);
       }
     }
 
@@ -220,7 +220,7 @@ export class ContactSystem {
 
   /** Steps 7-15: classify, apply advantage, check visibility, whistle. */
   _classify(eng, ball, ctx) {
-    if (eng.cooldown > 0 || eng.severity < 0.425) return null;
+    if (eng.cooldown > 0 || eng.severity < 0.545) return null;
     const { a, b } = eng;
     const f = ctx.profile.field;
 
@@ -238,7 +238,7 @@ export class ContactSystem {
 
     // Step 9: advantage. If the attacking player is still clearly better off,
     // the referee lets it go (section 15.5).
-    const advantage = eng.aHasBall && a.speed > 0.75 && eng.severity < 0.72 &&
+    const advantage = eng.aHasBall && a.speed > 0.75 && eng.severity < 0.545 &&
       a.facingQuality(0, goalZ) > 0.6;
     if (advantage) return null;
 
@@ -254,7 +254,7 @@ export class ContactSystem {
     let type = FOUL.ORDINARY;
     let reason = 'impeding a player not holding the ball';
 
-    const majorHold = (eng.holding > 0.60 || eng.sinking > 0.54) && !eng.aHasBall;
+    const majorHold = (eng.holding > 0.74 || eng.sinking > 0.66) && !eng.aHasBall;
     if (majorHold) {
       type = FOUL.EXCLUSION;
       reason = eng.sinking > eng.holding ? 'sinking an opponent not holding the ball'

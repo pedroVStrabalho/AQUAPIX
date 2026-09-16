@@ -30,6 +30,14 @@ import { TeamAI, DIFFICULTY } from '../ai/TeamAI.js';
 import { makeTeamTactics, OFFENSIVE_SYSTEMS, DEFENSIVE_SYSTEMS } from '../ai/Tactics.js';
 import { defaultLineup } from '../data/Teams.js';
 
+/**
+ * Defensive auto-switch damping. Control should feel like it belongs to you:
+ * it only moves when another defender is clearly better placed, and never more
+ * than once in this many seconds.
+ */
+const AUTO_SWITCH_MARGIN = 2.2;   // metres closer to the ball before it moves
+const AUTO_SWITCH_HOLD = 1.4;     // seconds you keep control after a switch
+
 export const ASSIST_PROFILE = {
   BEGINNER: 'beginner',
   STANDARD: 'standard',
@@ -1673,16 +1681,26 @@ export class MatchSim {
     }
 
     // Defending (or a loose ball we do not own): control the nearest defender.
+    //
+    // This is the single biggest thing that made the game feel uncontrollable.
+    // Switching whenever someone was 0.6m closer, with no cooldown, handed the
+    // player a different swimmer roughly once a second - measured at 103 switches
+    // a match. You could never settle into anyone. A switch now needs a real
+    // margin AND a minimum time on the current athlete, so control stays put
+    // unless somebody else is clearly better placed.
     if (this.manualSwitchCooldown > 0) return;
+    this.autoSwitchCooldown = Math.max(0, (this.autoSwitchCooldown ?? 0) - dt);
     const list = this.activeAthletes(side).filter((a) => !a.isGoalkeeper);
     if (!list.length) return;
     const dTo = (a) => ball.distanceTo(a.pos.x, 0.25, a.pos.z);
     let nearest = list[0];
     for (const a of list) if (dTo(a) < dTo(nearest)) nearest = a;
     const cur = this.userAthlete && list.includes(this.userAthlete) ? this.userAthlete : null;
-    // Only switch if the nearest is clearly closer than whoever we control now.
-    if (!cur || (nearest !== cur && dTo(nearest) < dTo(cur) - 0.6)) {
+    if (!cur) { this.setUserAthlete(nearest); this.autoSwitchCooldown = AUTO_SWITCH_HOLD; return; }
+    if (this.autoSwitchCooldown > 0) return;
+    if (nearest !== cur && dTo(nearest) < dTo(cur) - AUTO_SWITCH_MARGIN) {
       this.setUserAthlete(nearest);
+      this.autoSwitchCooldown = AUTO_SWITCH_HOLD;
     }
   }
 

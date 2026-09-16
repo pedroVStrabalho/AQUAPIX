@@ -119,7 +119,11 @@ export class Athlete {
     // pool - that reads as "the controls don't work". These are deliberately
     // arcade speeds: cross the pool in ~5s, reach top speed in well under a
     // second, and turn sharply. Attributes still separate fast from slow players.
-    this.maxSpeed = lerp(3.1, 4.3, a01(a.swimSpeed)) * form;
+    // Arcade, but readable. The pool is now drawn whole and landscape, so the
+    // eye has to track the entire field at once - at the old pace play crossed
+    // the screen faster than a person could read it. Still well above a real
+    // swimmer's ~2 m/s, so the controls stay responsive.
+    this.maxSpeed = lerp(2.7, 3.7, a01(a.swimSpeed)) * form;
     this.accelBase = lerp(6.0, 10.0, a01(a.firstStroke));
     this.turnBase = lerp(4.5, 7.5, a01(a.changeOfDirection));
     this.maxElevation = lerp(0.34, 0.72, a01(a.legPower) * 0.7 + a01(a.verticalReach) * 0.3);
