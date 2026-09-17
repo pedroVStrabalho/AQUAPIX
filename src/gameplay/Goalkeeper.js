@@ -321,8 +321,15 @@ export function attemptSave(gk, ball, brain, rng, opts = {}) {
   // Still scrambling from the shot they just spilled: a put-back beats them far
   // more often than a set shot of the same quality would.
   const scrambling = clamp01((brain?.beaten ?? 0) / 0.85);
+  // Raised from lerp(0.62, 0.98) when keepers stopped being allowed to "save"
+  // their own outlet passes. That bug let the same keeper run one shot through
+  // this model several times over - measured, 281 saves from 268 shots, more
+  // than one save per shot - so a ball that had genuinely beaten them was being
+  // stopped on a second or third attempt. Removing it exposed the honest save
+  // rate as too low, and shooting jumped from 63% to 71%. This puts the keeper
+  // back where the shooting numbers were, on one legitimate attempt per shot.
   const saveChance = clamp01(
-    lerp(0.62, 0.98, readiness) * lerp(0.85, 1.12, control) * lerp(1, 0.18, scrambling)
+    lerp(0.70, 1.04, readiness) * lerp(0.85, 1.12, control) * lerp(1, 0.18, scrambling)
   );
 
   const roll = rng.next();

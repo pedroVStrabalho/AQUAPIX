@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" shape-rendering="crispEdges">
+  <!-- AQUAPIX mark.
+       The wordmark is illegible below about 64px, and a bisected "A" reads as a
+       box with a hole at favicon size. So the icon carries the logo's own accent
+       instead: the yellow ball sitting on the waterline, pale sky above, deep
+       pool blue below. Same palette as the logo and the game.
+       Drawn on a 16x16 grid so every edge lands on a whole pixel. -->
+  <title>AQUAPIX</title>
+
+  <rect width="16" height="16" fill="#0d1b26"/>
+
+  <!-- Water. -->
+  <rect x="0" y="11" width="16" height="5" fill="#21557f"/>
+  <rect x="0" y="10" width="16" height="1" fill="#cfe6f5"/>
+
+  <!-- Ball, resting on the surface. Two overlapping rects give the rounded
+       corners a 6x6 pixel sprite needs. -->
+  <rect x="6" y="4" width="4" height="6" fill="#f2c230"/>
+  <rect x="5" y="5" width="6" height="4" fill="#f2c230"/>
+  <rect x="6" y="5" width="2" height="2" fill="#fff6cf"/>
+  <rect x="8" y="7" width="2" height="2" fill="#c98a12"/>
+
+  <!-- Ripple where the ball meets the water. -->
+  <rect x="2" y="11" width="3" height="1" fill="#3d9bd6"/>
+  <rect x="11" y="11" width="3" height="1" fill="#3d9bd6"/>
+</svg>

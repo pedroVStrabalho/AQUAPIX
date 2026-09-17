@@ -870,9 +870,15 @@ export class MatchSim {
       // genuine interceptions.
       const away = this.rng.range(0, Math.PI * 2);
       const s = result.outcome === 'deflection' ? 1.2 : 0.55;
+      // As with a block: a fumble near your own line should not be as likely to
+      // trickle into your own net as to go anywhere else.
+      const ownGoalZ = -best.attackDir * (this.profile.field.length / 2);
+      const outward = Math.sign(best.pos.z - ownGoalZ) || 1;
+      let fz = Math.cos(away) * s;
+      if (Math.sign(fz) !== outward) fz *= -0.35;
       b.launch(
         { x: b.pos.x, y: Math.max(0.15, b.pos.y), z: b.pos.z },
-        { x: Math.sin(away) * s, y: 0.9, z: Math.cos(away) * s },
+        { x: Math.sin(away) * s, y: 0.9, z: fz },
         { x: 0, y: 0, z: 0 }, 'deflection', best
       );
       best.catchCooldown = 0.10;
@@ -892,6 +898,24 @@ export class MatchSim {
       const brain = this.gkBrain[side];
       const gk = this.goalkeeperFor(side);
       if (!gk || !brain) continue;
+      // A keeper cannot "save" a ball their own team has just thrown.
+      //
+      // After holding a save the keeper outlets the ball, and that outlet is
+      // loose, in the goal mouth, and moving off a hand half a metre in front of
+      // the line - so it was being run straight back through the save model by
+      // the same keeper who had just caught it. Measured: 67% of held saves put
+      // the ball loose again within 0.52s, and the keeper then tipped their own
+      // outlet for a corner, parried it, or deflected it into their own net.
+      // That own goal is where the "keeper saves, then the game restarts from
+      // half court as if it were a goal" came from.
+      //
+      // A shot deflected toward goal by an outfield DEFENDER must still be
+      // savable, so this is deliberately narrow: only the keeper's own throw and
+      // their own team's passes are excluded, not every touch by that side.
+      if (this.ball.lastHolder === gk) continue;
+      if ((this.ball.kind === 'pass' || this.ball.kind === 'outlet')
+        && this.ball.lastTouchSide === side) continue;
+
       // Only the keeper whose goal is threatened.
       const gz = brain.goalZ(this.profile);
       if (Math.sign(this.ball.vel.z) !== Math.sign(gz - this.ball.pos.z)) continue;
@@ -1542,9 +1566,20 @@ export class MatchSim {
           this.stats[a.side].blocks++;
           const s = this.ball.speed * 0.45;
           const ang = this.rng.range(0, Math.PI * 2);
+          // A blocked ball must not be as likely to fly into your own net as
+          // anywhere else. A uniformly random direction meant defenders blocking
+          // near their own line regularly turned a save into an own goal:
+          // measured, 5 of seed 777's 19 goals had no scorer at all and every
+          // one of them came off a deflection. Blocks clear the ball away from
+          // the goal being defended; it can still come off awkwardly, it just
+          // isn't a coin flip.
+          const ownGoalZ = -a.attackDir * (this.profile.field.length / 2);
+          const outward = Math.sign(a.pos.z - ownGoalZ) || 1;
+          let vz = Math.cos(ang) * s * 0.7;
+          if (Math.sign(vz) !== outward) vz *= -0.35;
           this.ball.launch(
             { x: this.ball.pos.x, y: Math.max(0.25, this.ball.pos.y), z: this.ball.pos.z },
-            { x: Math.sin(ang) * s * 0.7, y: s * 0.4 + 1.2, z: Math.cos(ang) * s * 0.7 },
+            { x: Math.sin(ang) * s * 0.7, y: s * 0.4 + 1.2, z: vz },
             { x: 0, y: 0, z: 0 }, 'deflection', a
           );
           this.presentation.saveFlash = 0.6;
