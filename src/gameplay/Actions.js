@@ -189,7 +189,24 @@ export function resolvePass(passer, target, opts) {
   if (wet) rise = Math.min(rise, 1.4);
   launchY = rise;
 
-  let horiz = speed;
+  // The ball carries real air drag, but the vertical solve above is a drag-FREE
+  // ballistic one: it picks an arc that would arrive at `distance` if the ball
+  // never slowed down. It does slow down, so the arc hit the water short every
+  // single time - measured in an empty pool with a stationary receiver, a 12m
+  // pass died at 9.7m and only 70% of passes reached anybody at all. That is the
+  // "ball stops in the middle" you see in play, and no defender is involved.
+  //
+  // Compensate both levers: throw it harder AND flatten the arc against a longer
+  // real flight time, so the ball arrives in the receiver's hands.
+  const dragComp = 1 + clamp(distance * 0.026, 0.12, 0.40);
+  let horiz = speed * dragComp;
+  if (type !== PASS_TYPES.LOB) {
+    const realTime = Math.max(0.12, (distance * distErr) / Math.max(4, horiz * 0.86));
+    launchY = (targetY - from.y) / realTime + 0.5 * 9.81 * realTime;
+    if (type === PASS_TYPES.HIGH_DRY || type === PASS_TYPES.LOB_RELEASE) launchY += 2.4;
+    if (type === PASS_TYPES.SKIP) launchY -= 1.1;
+    if (wet) launchY = Math.min(launchY, 1.4);
+  }
 
   // A genuine lob: a slow, high ball dropped over a defender's reach and INTO
   // the receiver's hands. It is solved as its own trajectory rather than by
@@ -389,6 +406,15 @@ export function resolveShot(shooter, aimPoint, opts) {
   }[type] ?? 1;
   speed *= typeSpeed;
 
+  // A shot must always leave the hand harder than a pass, whatever the body
+  // position costs. Pressing SHOOT fires the instant the athlete is free, so the
+  // release happens at zero elevation with the shoulders still turning - and the
+  // stacked penalties for that were dragging a genuine shot below a soft pass.
+  // The lob is the one shot that is MEANT to be slow, so it keeps its own speed.
+  if (type !== SHOT_TYPES.LOB) {
+    speed = Math.max(speed, 17.5 * lerp(0.92, 1.06, factors.power));
+  }
+
   // --- Accuracy ----------------------------------------------------------
   // Perfect release timing produces the best version of the shot this athlete can
   // physically execute (section 14.4) - it never guarantees a goal.
@@ -515,7 +541,14 @@ export function contextualShotType(shooter, distance, pressure, afterFake, fromC
   if (facing < 0.35) return distance < 3.5 ? SHOT_TYPES.BACKHAND : SHOT_TYPES.SWEEP;
   if (distance < 2.4 && pressure > 0.45) return SHOT_TYPES.POP;
   if (distance < 3.2 && facing < 0.6) return SHOT_TYPES.CENTRE_TURN;
-  if (goalkeeperUp && distance > 5.5) return SHOT_TYPES.LOB;
+  // A lob is a rare, deliberate answer to a keeper who has genuinely charged out.
+  // This used to read `goalkeeperUp && distance > 5.5`, where goalkeeperUp meant
+  // "the keeper is more than 1m off its line" - which is true of a keeper simply
+  // sitting where a keeper sits. So EVERY shot from beyond 5.5m was silently
+  // turned into a lob, and a lob leaves the hand at 42% speed. That is why
+  // shooting was slower than passing: measured, 6.5 m/s against a 10.3 m/s soft
+  // pass. Shots from range are power shots unless the keeper is really stranded.
+  if (goalkeeperUp && distance > 6.5 && distance < 11) return SHOT_TYPES.LOB;
   if (afterFake) return SHOT_TYPES.DELAYED;
   if (fromCatch) return SHOT_TYPES.CATCH_AND_SHOOT;
   if (shooter.elevation < shooter.maxElevation * 0.32 && distance > 5) return SHOT_TYPES.SIDEARM;

@@ -1380,7 +1380,9 @@ export class MatchSim {
     const distToGoal = Math.hypot(shooter.pos.x - aimPoint.x, shooter.pos.z - aimPoint.z);
     const shotType = type ?? contextualShotType(
       shooter, distToGoal, pressureOn(shooter, opponents), shooter.pumpFakes > 0,
-      shooter.justCaught > 0, gk && Math.abs(gk.pos.z - aimPoint.z) > 1.0
+      // "The keeper has come out" must mean genuinely stranded off the line. At
+      // the old 1.0m a keeper standing normally counted as charging out.
+      shooter.justCaught > 0, !!gk && Math.abs(gk.pos.z - aimPoint.z) > 3.6
     );
 
     // Release timing.
@@ -1505,8 +1507,27 @@ export class MatchSim {
       // ball hitting someone in the back of the hand on its way to goal.
       const toHandX = hand.x - this.ball.pos.x;
       const toHandZ = hand.z - this.ball.pos.z;
-      const approaching = this.ball.vel.x * toHandX + this.ball.vel.z * toHandZ;
-      if (approaching <= 0) continue;
+      // The arm has to be IN THE SHOT LANE and the ball still short of it - not
+      // merely somewhere in the forward hemisphere, which let a defender off to
+      // one side swat a ball that was passing them by.
+      //
+      // Measured against the ball's flight line, not as an angle to the ball: an
+      // angular cone is ill-conditioned exactly when blocks happen, because the
+      // ball->hand vector swings through 90 degrees as the ball passes close by
+      // (measured 0.63 -> 0.24 -> -0.29 on three consecutive frames of a clean
+      // block). Along-track distance and perpendicular offset stay stable.
+      const ballSpeed = Math.hypot(this.ball.vel.x, this.ball.vel.z) || 1e-6;
+      const vdx = this.ball.vel.x / ballSpeed;
+      const vdz = this.ball.vel.z / ballSpeed;
+      const along = toHandX * vdx + toHandZ * vdz;
+      if (along <= 0) continue;                                    // ball is already past the arm
+      const perp = Math.hypot(toHandX - along * vdx, toHandZ - along * vdz);
+      if (perp > reach * 0.8) continue;                            // arm is not in the lane
+
+      // And you cannot block facing away: the defender must be turned into the
+      // incoming ball. Taken against the flight direction rather than the ball's
+      // instantaneous position, for the same stability reason.
+      if (-(Math.sin(a.shoulder) * vdx + Math.cos(a.shoulder) * vdz) <= 0) continue;
 
       if (this.ball.distanceTo(hand.x, hand.y + 0.25, hand.z) < reach) {
         // ONE swipe per defender per shot. This used to roll every frame for the

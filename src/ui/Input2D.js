@@ -282,23 +282,35 @@ export class Input2D {
     const sim = this.sim;
     const mates = sim.activeAthletes(passer.side).filter((m) => m !== passer);
     if (!mates.length) return null;
-    let best = null, bestScore = -1e9;
-    for (const m of mates) {
-      const dx = m.pos.x - passer.pos.x;
-      const dz = m.pos.z - passer.pos.z;
-      const d = Math.hypot(dx, dz) || 1;
-      if (longOnly && d < 6) continue;
-      let score = 0;
-      if (dir && dir.length() > 0.2) {
-        score += ((dx / d) * dir.x + (dz / d) * dir.z) * 2.4;  // in the pushed direction
+    const aiming = dir && dir.length() > 0.2;
+    // When you push a direction you are naming a team-mate, not offering a hint.
+    // The direction term used to be worth 2.4 against a 0.8 "prefer forward"
+    // bonus, so a team-mate square to your left could lose to one you were not
+    // pointing at. Anyone outside a 90 degree cone around the push is simply not
+    // a candidate - unless nobody is in the cone at all, in which case we fall
+    // back to the old open scoring rather than refusing to pass.
+    for (const pass of aiming ? ['cone', 'any'] : ['any']) {
+      let best = null, bestScore = -1e9;
+      for (const m of mates) {
+        const dx = m.pos.x - passer.pos.x;
+        const dz = m.pos.z - passer.pos.z;
+        const d = Math.hypot(dx, dz) || 1;
+        if (longOnly && d < 6) continue;
+        let score = 0;
+        if (aiming) {
+          const align = (dx / d) * dir.x + (dz / d) * dir.z;
+          if (pass === 'cone' && align < 0.35) continue;
+          score += align * 6.0;
+        }
+        // Prefer forward and open team-mates.
+        const goalZ = passer.attackDir * (sim.profile.field.length / 2);
+        score += clamp01((Math.abs(goalZ - passer.pos.z) - Math.abs(goalZ - m.pos.z)) / 6) * 0.8;
+        score -= d * 0.04;
+        if (score > bestScore) { bestScore = score; best = m; }
       }
-      // Prefer forward and open teammates.
-      const goalZ = passer.attackDir * (sim.profile.field.length / 2);
-      score += clamp01((Math.abs(goalZ - passer.pos.z) - Math.abs(goalZ - m.pos.z)) / 6) * 0.8;
-      score -= d * 0.04;
-      if (score > bestScore) { bestScore = score; best = m; }
+      if (best) return best;
     }
-    return best;
+    return null;
   }
 
   _clear() {
