@@ -965,6 +965,12 @@ export class MatchSim {
         );
         this.ball.eventFlags.splash = 0.4;
       } else if (res.outcome === 'controlled') {
+        // The keeper has caught and held it: that shot is finished. Leaving the
+        // shooter on record meant a ball that later squirted over the line in a
+        // scramble was still credited to their shot, which made it a goal
+        // instead of a corner - and restarted the match from the centre after a
+        // save the keeper had cleanly held.
+        this._lastShooter = null;
         this._giveBall(gk);
         const ev = shotClockAfter(this.profile, POSSESSION_EVENT.GAIN);
         this._applyShotClock(ev);
@@ -974,6 +980,15 @@ export class MatchSim {
         // A keeper who has spilled the ball is scrambling, not set. The rebound
         // that follows meets a goalkeeper still recovering their position, which
         // is what makes a put-back the most dangerous ball in water polo.
+        //
+        // But a parry goes AWAY from the goal. A keeper who gets a hand to the
+        // ball and pushes it backwards into their own net is not a save, it is a
+        // goal they invented - and it was happening after one held save in ten,
+        // which from the player's seat is "the keeper saved it and the match
+        // restarted". Blocks and fumbles were already biased outward; the
+        // keeper's own spill was not.
+        const spillOut = Math.sign(gk.pos.z - gz) || 1;
+        if (Math.sign(res.vel.z) !== spillOut) res.vel.z *= -0.4;
         brain.beaten = 0.95;
         this.ball.launch(
           { x: this.ball.pos.x, y: Math.max(0.2, this.ball.pos.y), z: this.ball.pos.z },
@@ -998,6 +1013,23 @@ export class MatchSim {
 
     const defendingSide = this.attackDir.home === sign ? 'away' : 'home';
     const scoringSide = this.opponentSide(defendingSide);
+
+    // A deflection with no shot behind it is not a goal, it is the defence
+    // putting the ball over their own line - which is a corner throw.
+    //
+    // This is the "the keeper saves it and the match restarts from half court"
+    // bug. A save was followed by a fumble or a scramble in the goal mouth, the
+    // ball trickled over the line with no attacker having shot at all, and it
+    // was recorded as a goal, so the game restarted from the centre as if one
+    // had been scored. A shot deflected in off a defender still counts, because
+    // there the shooter IS attributable - that is a real own goal.
+    const ls = this._lastShooter;
+    const fromAShot = ls && ls.athlete.side === scoringSide && this.clockNow - ls.at < 4;
+    if (ball.kind === 'deflection' && !fromAShot) {
+      this._onEndLine(ball, sign);
+      return;
+    }
+
     // A ball put into their own goal still counts for the opponents.
     this._awardGoal(scoringSide, ball);
   }
