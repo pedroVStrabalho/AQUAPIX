@@ -157,3 +157,71 @@ test('Z raises the arm when defending', () => {
   assert.ok(me.blockTimer > 0, 'holding Z raises the arm to block');
   fire('keyup', 'KeyZ');
 });
+
+test('SPACE commits a foul when defending, and position decides what it costs', () => {
+  // In front of your man it is an ordinary foul; from behind him it is an
+  // exclusion. Driven through a real SPACE key, not by poking the input state.
+  for (const [where, side, expected] of [['in front', 1, 'ordinary'], ['behind', -1, 'exclusion']]) {
+    const { sim, frame, me } = withBall(63);
+    const theirs = sim.activeAthletes('away').find((a) => !a.isGoalkeeper);
+    sim._giveBall(theirs);
+    sim.setUserAthlete(me);
+    // Clear everyone else so the man we are marking is unambiguous.
+    for (const s of ['home', 'away']) {
+      for (const a of sim.activeAthletes(s)) {
+        if (a === me || a === theirs || a.isGoalkeeper) continue;
+        a.pos.x = 13; a.pos.z = 0; a.vel.set(0, 0);
+      }
+    }
+    theirs.pos.x = 0; theirs.pos.z = 0; theirs.vel.set(0, 0);
+    me.pos.x = 0; me.pos.z = theirs.attackDir * side * 1.0; me.vel.set(0, 0);
+    me.actionLock = 0; me.foulCooldown = 0;
+
+    let type = null;
+    sim.bus.on('foul', ({ foul }) => { type = type ?? foul.type; });
+    fire('keydown', 'Space');
+    frame();
+    fire('keyup', 'Space');
+    for (let i = 0; i < 10 && !type; i++) frame();
+
+    assert.equal(type, expected, `SPACE ${where} of your man gives a ${expected} foul (got ${type})`);
+  }
+});
+
+test('SPACE still shoots when you have the ball', () => {
+  // The same key does both jobs; they must never collide.
+  const { sim, frame, give, me } = withBall(64);
+  give();
+  let shot = false;
+  sim.bus.on('shot', () => { shot = true; });
+  fire('keydown', 'Space');
+  for (let i = 0; i < 12 && !shot; i++) frame();
+  fire('keyup', 'Space');
+  assert.ok(shot, 'SPACE shoots while holding the ball');
+  assert.ok(!me.hasBall, 'and the ball has left the hand');
+});
+
+test('a direct pass (Z) is flat, and only the lob (C) arcs', () => {
+  const { sim, frame, give } = withBall(65);
+  const apex = { direct: [], lob: [] };
+  for (const [key, label] of [['KeyZ', 'direct'], ['KeyC', 'lob']]) {
+    for (let n = 0; n < 12; n++) {
+      give();
+      let vy = null, y0 = null;
+      sim.bus.on('pass', () => { vy = sim.ball.vel.y; y0 = sim.ball.pos.y; });
+      fire('keydown', 'KeyD');
+      fire('keydown', key);
+      frame();
+      fire('keyup', key);
+      fire('keyup', 'KeyD');
+      for (let i = 0; i < 4 && vy === null; i++) frame();
+      if (vy !== null) apex[label].push(y0 + Math.max(0, vy) ** 2 / (2 * 9.81));
+      for (let i = 0; i < 20; i++) frame();
+    }
+  }
+  const mean = (a) => a.reduce((s, x) => s + x, 0) / Math.max(1, a.length);
+  assert.ok(apex.direct.length >= 5 && apex.lob.length >= 5, 'both pass types were thrown');
+  const d = mean(apex.direct), l = mean(apex.lob);
+  assert.ok(d < 1.6, `a direct pass stays flat (peaks ${d.toFixed(2)}m)`);
+  assert.ok(l > d * 1.8, `the lob is clearly a lob next to it (${l.toFixed(2)}m vs ${d.toFixed(2)}m)`);
+});

@@ -20,7 +20,10 @@ const KEYMAP = {
   // Z / X / C sit together under the left hand while WASD steers.
   KeyZ: 'action2',    // PASS   (attack) / switch (defence)
   KeyX: 'action1',    // SHOOT  (attack) / steal  (defence)
-  Space: 'action1',   // shoot, alternate
+  // SPACE does two jobs that can never overlap: you cannot shoot without the
+  // ball, and you cannot foul while you have it. Attacking it shoots; defending
+  // it deliberately fouls the man you are marking.
+  Space: ['action1', 'foul'],
   KeyC: 'lob',        // LOB PASS - its own action, not a modifier
 
   KeyJ: 'action2',    // legacy pass binding, kept working
@@ -45,18 +48,28 @@ export class Input2D {
     this.touchButtons = {};
     this._time = 0;
 
+    // A key may carry more than one action (SPACE shoots and fouls, in contexts
+    // that cannot overlap), so every binding is normalised to a list.
+    const actionsFor = (code) => {
+      const a = KEYMAP[code];
+      return a == null ? null : (Array.isArray(a) ? a : [a]);
+    };
     this._kd = (e) => {
-      const a = KEYMAP[e.code];
-      if (!a) return;
+      const list = actionsFor(e.code);
+      if (!list) return;
       if (e.code === 'Space' || e.code.startsWith('Arrow')) e.preventDefault();
-      if (!this.down.has(a)) this.pressed.add(a);
-      this.down.add(a);
+      for (const a of list) {
+        if (!this.down.has(a)) this.pressed.add(a);
+        this.down.add(a);
+      }
     };
     this._ku = (e) => {
-      const a = KEYMAP[e.code];
-      if (!a) return;
-      this.down.delete(a);
-      this.released.add(a);
+      const list = actionsFor(e.code);
+      if (!list) return;
+      for (const a of list) {
+        this.down.delete(a);
+        this.released.add(a);
+      }
     };
     window.addEventListener('keydown', this._kd);
     window.addEventListener('keyup', this._ku);
@@ -255,8 +268,14 @@ export class Input2D {
     if (carrier && carrier.side !== a.side) {
       cmd.face = Math.atan2(carrier.pos.x - a.pos.x, carrier.pos.z - a.pos.z);
     }
-    // Tackle / steal.
-    if (this.hit('action1')) sim.trySteal(a);
+    // SPACE - deliberately foul the man you are marking. In front of him that is
+    // an ordinary foul that just stops the attack; from behind him it is an
+    // exclusion and you sit out. Checked before the steal so SPACE fouls rather
+    // than tackling, while X still tackles.
+    if (this.hit('foul')) {
+      sim.tryDeliberateFoul(a);
+      cmd.rise = Math.max(cmd.rise, 0.6);
+    } else if (this.hit('action1')) sim.trySteal(a);
     // Block (raise arm) on Z - the same key that passes when you have the ball.
     // L still works. Switching defenders lives on E, so Z is free here.
     if (this.isDown('action2') || this.isDown('action3')) {

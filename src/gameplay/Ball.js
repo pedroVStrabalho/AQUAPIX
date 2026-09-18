@@ -81,6 +81,7 @@ export class Ball {
     this.holder = null;
     this.timeSinceLoose = 0;
     this.saveAttempted = false;   // one save attempt per shot, not one per frame
+    this.breakaway = false;       // set by tryShot for an uncontested counter
     this.exitVelZ = 0;            // velocity along z at the moment it left play
     this.blockTriedBy = new Set();// one block attempt per defender per shot
     this.kind = kind;

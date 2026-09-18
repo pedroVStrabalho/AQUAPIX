@@ -899,10 +899,18 @@ export class TeamAI {
         }
 
         // Tactical foul: stop a counter or a centre entry at the cost of a free throw.
-        if (mark === carrier && gap < 1.4 && sim.transitionTimer > 0 &&
+        // This branch only ever set a brace flag and wrote a debug note - it
+        // never actually fouled anybody, so the AI's "tactical foul" did not
+        // exist. It now commits the real thing, through the same call the human
+        // makes with SPACE, so the position decides the punishment: in front of
+        // the carrier it costs a free throw, from behind it costs an exclusion.
+        // That is where man-up situations come from now that defenders mark
+        // goalside and so almost never foul from behind by accident.
+        if (mark === carrier && gap < 2.2 && sim.transitionTimer > 0 &&
             p.personalFouls < profile.discipline.personalFoulLimit - 1 &&
             this.rng.next() < scheme.foulRisk * this.diff.risk * dt * 3) {
           cmd.brace = true;
+          if (mayAct) sim.tryDeliberateFoul(p);
           this._note(p, 'tactical foul', scheme.foulRisk);
         }
       }

@@ -200,9 +200,31 @@ export function resolvePass(passer, target, opts) {
   // real flight time, so the ball arrives in the receiver's hands.
   const dragComp = 1 + clamp(distance * 0.026, 0.12, 0.40);
   let horiz = speed * dragComp;
+
+  // A direct pass is thrown FLAT. Solving the arc ballistically for a given
+  // flight time means a longer pass needs more and more lift - an 8m pass came
+  // out with 3.9 m/s of rise, an arc peaking around 0.8m, which looks like a
+  // small lob. The lob is its own key (C) and a direct pass on Z must never
+  // impersonate it. So the arc is capped low and the throw is made fast enough
+  // to arrive inside that flat trajectory instead.
   if (type !== PASS_TYPES.LOB) {
-    const realTime = Math.max(0.12, (distance * distErr) / Math.max(4, horiz * 0.86));
-    launchY = (targetY - from.y) / realTime + 0.5 * 9.81 * realTime;
+    const flat = distance * distErr;
+    // The arc we WANT: low enough that it never reads as a lob.
+    const apexRise = clamp(0.10 + flat * 0.020, 0.10, 0.40);
+    const vyFlat = Math.sqrt(2 * 9.81 * apexRise);
+    const tFlat = Math.max(0.16,
+      vyFlat / 9.81 + Math.sqrt(2 * Math.max(0.05, from.y + apexRise - targetY) / 9.81));
+
+    // Throwing it flat over a long distance demands a speed no human has - the
+    // uncapped solve asked for 23 m/s at 8m and 32 m/s at 12m, which is faster
+    // than a shot. A pass must never outrun a shot, so the speed is capped and
+    // any arc physics still demands beyond that is accepted.
+    const PASS_SPEED_CAP = 15.5;   // stays under the 17.5 m/s shot floor
+    horiz = clamp(Math.max(horiz, flat / tFlat), 4, PASS_SPEED_CAP);
+
+    // Re-solve the rise for the speed actually used, so the ball still arrives.
+    const tReal = flat / Math.max(4, horiz * 0.88);
+    launchY = (targetY - from.y) / tReal + 0.5 * 9.81 * tReal;
     if (type === PASS_TYPES.HIGH_DRY || type === PASS_TYPES.LOB_RELEASE) launchY += 2.4;
     if (type === PASS_TYPES.SKIP) launchY -= 1.1;
     if (wet) launchY = Math.min(launchY, 1.4);

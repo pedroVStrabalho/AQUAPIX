@@ -189,15 +189,46 @@ export class ContactSystem {
     // A defender's intent is inferred from what they are actually doing: how hard
     // they hold position across the attacker's line, how long, and how fatigued
     // they are (tired defenders grab).
+    // Being BEATEN is its own kind of contact. eng.impeding only rises while the
+    // defender is goalside, so every foul the model could produce was a front
+    // one and exclusions had quietly stopped existing. A defender who has been
+    // gone past, is still within arm's reach, and is losing the race, grabs -
+    // and that is the foul that gets you excluded.
+    const behindness = clamp01(-toGoal.dot(toDef));
+    // A defender who is behind you and within arm's reach has already been
+    // beaten - they do not also have to be losing a sprint for the grab to
+    // count, which is what an (a.speed - b.speed) gate demanded. Being there at
+    // all is the problem; outpacing them just makes it worse.
+    eng.trailing = behindness *
+      clamp01(1 - (d - 0.5) / 0.9) *
+      clamp01((a.speed - b.speed + 0.95) / 1.25);
+
     const grabIntent = clamp01(
-      eng.impeding * (0.55 + 0.45 * closing) *
+      (eng.impeding + eng.trailing * 0.95) * (0.55 + 0.45 * closing) *
       lerp(1.35, 0.55, legalSkill) *
       lerp(1.3, 0.95, b.freshness)
     );
 
-    // Contact on the player actually holding the ball is largely legal - you may
-    // play the ball. Contact on anyone else is where fouls come from.
-    const holdRate = aHasBall ? grabIntent * 0.3 : grabIntent;
+    // Remember which kind of contact BUILT this foul, rather than reading the
+    // geometry at the instant of the whistle. By the time the referee blows,
+    // bodies have moved; what decides an exclusion is that the defender spent
+    // the engagement grabbing from behind, not where they happen to be now.
+    eng.behindWork = (eng.behindWork ?? 0) + eng.trailing * dt;
+    eng.frontWork = (eng.frontWork ?? 0) + eng.impeding * dt;
+
+    // Where is the defender: goalside (in front of the attacker, between them and
+    // the goal they are attacking) or behind them? This is the difference between
+    // an ordinary foul and an exclusion in water polo, and nothing in the model
+    // used to look at it.
+    eng.fromBehind = -toGoal.dot(toDef);   // +1 directly behind, -1 directly in front
+
+    // Contact on the player holding the ball is the ORDINARY foul of water polo -
+    // a defender fouling the centre forward is the most common whistle in the
+    // sport. Treating it as "largely legal" at 0.3 meant the ball carrier could
+    // essentially never draw one: measured over six matches, the athlete the
+    // human was controlling was the victim of 0 out of 54 fouls, so every whistle
+    // happened somewhere else and teleported the ball to a stranger.
+    const holdRate = aHasBall ? grabIntent * 0.6 : grabIntent;
     // The subtracted term is the "letting go" rate: a defender must keep working
     // at it for the hold to register as illegal, and it decays the moment they
     // stop. Sustained contact of about a second is what draws the whistle.
@@ -220,7 +251,10 @@ export class ContactSystem {
 
   /** Steps 7-15: classify, apply advantage, check visibility, whistle. */
   _classify(eng, ball, ctx) {
-    if (eng.cooldown > 0 || eng.severity < 0.545) return null;
+    // A foul is an event, not a metronome. Letting the carrier draw fouls at all
+    // (see holdRate) pushed the whistle to 17.5 a match, which is a stoppage
+    // every seventeen seconds; the threshold carries that back down.
+    if (eng.cooldown > 0 || eng.severity < 0.64) return null;
     const { a, b } = eng;
     const f = ctx.profile.field;
 
@@ -254,13 +288,33 @@ export class ContactSystem {
     let type = FOUL.ORDINARY;
     let reason = 'impeding a player not holding the ball';
 
-    const majorHold = (eng.holding > 0.74 || eng.sinking > 0.66) && !eng.aHasBall;
-    if (majorHold) {
+    // Where the defender is decides what the foul is, which is how the sport
+    // actually works and what the model was missing entirely:
+    //
+    //   IN FRONT  - the defender is goalside, pressing down on a player trying to
+    //               rise. That is an ordinary foul; the attack restarts with a
+    //               free throw.
+    //   BEHIND    - the defender has been beaten and pulls the attacker back by
+    //               the shoulder or leg. That is an exclusion, because it is the
+    //               only way to stop someone who has already gone past you.
+    const behindWork = eng.behindWork ?? 0;
+    const frontWork = eng.frontWork ?? 0;
+    const fromBehind = behindWork > frontWork * 0.85 && behindWork > 0.05;
+    const heavy = eng.holding > 0.74 || eng.sinking > 0.66;
+    // Pulling someone back from behind IS the exclusion foul - it does not need
+    // to be as extreme as a front hold to be one, because there is no legal
+    // version of it. Front contact has to get genuinely heavy before it counts.
+    if ((heavy || eng.holding > 0.56 || eng.sinking > 0.48) && fromBehind) {
       type = FOUL.EXCLUSION;
-      reason = eng.sinking > eng.holding ? 'sinking an opponent not holding the ball'
-                                         : 'holding and pulling back an opponent not holding the ball';
+      reason = eng.sinking > eng.holding
+        ? 'sinking an opponent from behind'
+        : 'holding and pulling an opponent back from behind';
+    } else if (heavy) {
+      reason = eng.sinking > eng.holding
+        ? 'pushing an opponent under while defending in front'
+        : 'holding an opponent while defending in front';
     }
-    if (majorHold && insidePenaltyArea && probableGoalPrevented(eng, probableGoal)) {
+    if (heavy && insidePenaltyArea && probableGoalPrevented(eng, probableGoal)) {
       type = FOUL.PENALTY;
       reason = 'foul inside the five metre area preventing a probable goal';
     }
@@ -276,12 +330,20 @@ export class ContactSystem {
     eng.holding *= 0.2;
     eng.sinking *= 0.2;
     eng.severity *= 0.25;
+    const workBehind = eng.behindWork ?? 0;
+    const workFront = eng.frontWork ?? 0;
+    eng.behindWork = 0;
+    eng.frontWork = 0;
 
     return {
       type,
       reason,
       offender: b,
       victim: a,
+      // How the engagement was built, front vs behind. Kept on the record so the
+      // front/behind rule can be measured rather than guessed at.
+      workBehind, workFront,
+      holding: eng.holding, sinking: eng.sinking,
       at: { x: (a.pos.x + b.pos.x) / 2, z: (a.pos.z + b.pos.z) / 2 },
       severity: peak,
       insidePenaltyArea,

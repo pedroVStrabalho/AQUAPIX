@@ -401,6 +401,13 @@ export class MatchSim {
         taker.pos.set(r.spot.x, r.spot.z);
         taker.vel.set(0, 0);
         this._giveBall(taker);
+        // You were fouled, so you take the restart. Without this the ball was
+        // handed to the victim while the camera and the controls stayed on
+        // whoever you happened to be steering, so from the player's seat the
+        // ball had simply gone to another player.
+        if (this.userControlsSide === taker.side && !this.lockUserAthlete && !taker.isGoalkeeper) {
+          this.userAthlete = taker;
+        }
       }
       this.pendingRestart = null;
       this._beginLive();
@@ -920,6 +927,9 @@ export class MatchSim {
       const gz = brain.goalZ(this.profile);
       if (Math.sign(this.ball.vel.z) !== Math.sign(gz - this.ball.pos.z)) continue;
       if (Math.abs(this.ball.pos.z - gz) > 2.6) continue;
+
+      // Breakaway: see tryShot. The keeper gets a token chance, not a real one.
+      if (this.ball.breakaway && !this.rng.chance(0.06)) continue;
 
       const manual = (this.userGkControl && this.userAthlete === gk) ? this.userCommand.saveAim : null;
       const res = attemptSave(gk, this.ball, brain, this.rng, { manualDirection: manual });
@@ -1446,6 +1456,17 @@ export class MatchSim {
 
     this.ball.intendedReceiver = null;
     this.ball.launch(res.from, res.vel, res.spin, 'shot', shooter);
+
+    // A genuine breakaway is not a probability question. If you have broken away
+    // on the counter, you are inside five metres, and there is no defender near
+    // enough to touch you, then a goalkeeper stopping it is not something that
+    // happens in water polo - so the save model is not consulted. In a set
+    // attack from the same spot the keeper still has every chance; what makes
+    // this different is that nobody is there to make the shot difficult.
+    const chasers = opponents.filter((o) => !o.isGoalkeeper &&
+      Math.hypot(o.pos.x - shooter.pos.x, o.pos.z - shooter.pos.z) < 3.5).length;
+    this.ball.breakaway = this.transitionTimer > 0 && distToGoal < 5.0 && chasers === 0;
+
     this.lastShot = res;
     // Remember who shot, so a shot that goes in off a keeper's hand or a
     // blocker still belongs to the shooter. Otherwise the goal is recorded with
@@ -1508,6 +1529,60 @@ export class MatchSim {
     // which the contact system will pick up on its own.
     defender.stunned = 0.25;
     return false;
+  }
+
+  /**
+   * Deliberately foul the opponent you are marking (SPACE on defence).
+   *
+   * What it costs you is decided by where you are, exactly as in the real sport:
+   * in front of your man it is an ordinary foul and simply stops the attack;
+   * from behind him it is an exclusion and you leave the water for twenty
+   * seconds. So the button is always "commit a foul", and your position decides
+   * whether that was clever or expensive.
+   */
+  tryDeliberateFoul(defender) {
+    if (!this.isLive() || !defender?.inPool || defender.actionLock > 0) return false;
+    if (defender.foulCooldown > 0) return false;
+
+    const opponents = this.activeAthletes(this.opponentSide(defender.side))
+      .filter((o) => !o.isGoalkeeper);
+    if (!opponents.length) return false;
+
+    // The man you are marking: the carrier if he is within reach, else nearest.
+    let victim = null, best = Infinity;
+    for (const o of opponents) {
+      const d = Math.hypot(o.pos.x - defender.pos.x, o.pos.z - defender.pos.z);
+      const score = d - (o.hasBall ? 1.4 : 0);
+      if (score < best) { best = score; victim = o; }
+    }
+    const reach = defender.reach + 1.2;
+    if (!victim || Math.hypot(victim.pos.x - defender.pos.x, victim.pos.z - defender.pos.z) > reach) {
+      return false;
+    }
+
+    // Behind him, or goalside of him? Measured against the direction HE attacks.
+    const goalZ = victim.attackDir * (this.profile.field.length / 2);
+    const gx = 0 - victim.pos.x, gz = goalZ - victim.pos.z;
+    const glen = Math.hypot(gx, gz) || 1;
+    const dx = defender.pos.x - victim.pos.x, dz = defender.pos.z - victim.pos.z;
+    const dlen = Math.hypot(dx, dz) || 1;
+    const goalside = ((gx / glen) * (dx / dlen) + (gz / glen) * (dz / dlen));
+
+    const fromBehind = goalside < -0.25;
+    defender.foulCooldown = 1.2;
+    defender.actionLock = 0.28;
+
+    this._awardFoul({
+      type: fromBehind ? FOUL.EXCLUSION : FOUL.ORDINARY,
+      reason: fromBehind
+        ? 'holding and pulling an opponent back from behind'
+        : 'holding an opponent while defending in front',
+      offender: defender,
+      victim,
+      at: { x: victim.pos.x, z: victim.pos.z },
+      deliberate: true,
+    });
+    return true;
   }
 
   tryBlock(defender) {

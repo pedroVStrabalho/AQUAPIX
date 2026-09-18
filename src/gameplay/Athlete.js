@@ -94,6 +94,7 @@ export class Athlete {
     this.pumpFakes = 0;
     this.lastPumpFakeAt = -99;
     this.catchCooldown = 0;
+    this.foulCooldown = 0;   // stops SPACE spamming deliberate fouls
     this.stealCooldown = 0;
     this.blockTimer = 0;
     this.armRaised = 0;      // 0..1 visual + block reach
@@ -175,6 +176,7 @@ export class Athlete {
 
     this.actionLock = Math.max(0, this.actionLock - dt);
     this.catchCooldown = Math.max(0, this.catchCooldown - dt);
+    this.foulCooldown = Math.max(0, this.foulCooldown - dt);
     this.stealCooldown = Math.max(0, this.stealCooldown - dt);
     this.stunned = Math.max(0, this.stunned - dt);
     this.blockTimer = Math.max(0, this.blockTimer - dt);
