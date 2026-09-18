@@ -95,7 +95,10 @@ class Game {
       league: this.league,
       profile: getProfile(cfg.profileId), homeId: cfg.homeId, awayId: cfg.awayId,
       difficulty: cfg.difficulty, assist: cfg.assist, refereeProfile: cfg.refereeProfile,
-      userSide: cfg.userSide, onEnd: () => this.showFullTime('main'),
+      // Never launch a match nobody is playing in. Spectate is gone from the
+      // setup screen, but a config saved before that could still carry null.
+      userSide: cfg.userSide === 'away' ? 'away' : 'home',
+      onEnd: () => this.showFullTime('main'),
     });
   }
 

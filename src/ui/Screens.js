@@ -273,11 +273,14 @@ const SCREENS = {
       { value: 'human', label: 'Human-like' },
     ], cfg.refereeProfile, (v) => { cfg.refereeProfile = v; mgr.show('matchSetup'); })));
 
+    // No spectate option: AQUAPIX is a game you play, not one you watch. The
+    // AI-versus-AI simulation itself stays - Coach Career needs it to run the
+    // fixtures you are not playing in - it just is not something you can sit
+    // down in front of.
     options.appendChild(field('You control', chipRow([
       { value: 'home', label: 'Home' },
       { value: 'away', label: 'Away' },
-      { value: null, label: 'Spectate (AI v AI)' },
-    ], cfg.userSide, (v) => { cfg.userSide = v; mgr.show('matchSetup'); })));
+    ], cfg.userSide === 'away' ? 'away' : 'home', (v) => { cfg.userSide = v; mgr.show('matchSetup'); })));
 
     body.appendChild(options);
 
