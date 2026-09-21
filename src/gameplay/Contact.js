@@ -256,6 +256,13 @@ export class ContactSystem {
     // every seventeen seconds; the threshold carries that back down.
     if (eng.cooldown > 0 || eng.severity < 0.64) return null;
     const { a, b } = eng;
+
+    // Fouls are called where the play is. A tussle eight metres from the ball
+    // was being whistled - including exclusions - so from the player's seat the
+    // referee stopped the game for something happening out of play. The man with
+    // the ball, and whoever is fighting for position near it, are what count.
+    const offBall = Math.hypot(ball.pos.x - a.pos.x, ball.pos.z - a.pos.z);
+    if (!eng.aHasBall && offBall > 4.5) return null;
     const f = ctx.profile.field;
 
     // Step 7: location relative to goal.

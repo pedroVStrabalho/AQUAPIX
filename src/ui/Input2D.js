@@ -9,8 +9,9 @@
  * Supports keyboard, mouse and touch (a virtual stick + action buttons).
  */
 
+import { MATCH_STATE } from '../rules/RulesEngine.js';
 import { Vec2, clamp, clamp01 } from '../core/Math2.js';
-import { PASS_TYPES, SHOT_TYPES } from '../gameplay/Actions.js';
+import { PASS_TYPES, SHOT_TYPES, laneOpenness } from '../gameplay/Actions.js';
 
 const KEYMAP = {
   KeyW: 'up', ArrowUp: 'up', KeyS: 'down', ArrowDown: 'down',
@@ -18,7 +19,7 @@ const KEYMAP = {
   ShiftLeft: 'sprint', ShiftRight: 'sprint',
 
   // Z / X / C sit together under the left hand while WASD steers.
-  KeyZ: 'action2',    // PASS   (attack) / switch (defence)
+  KeyZ: 'action2',    // PASS   (attack) / raise arm (defence)
   KeyX: 'action1',    // SHOOT  (attack) / steal  (defence)
   // SPACE does two jobs that can never overlap: you cannot shoot without the
   // ball, and you cannot foul while you have it. Attacking it shoots; defending
@@ -147,6 +148,25 @@ export class Input2D {
     if (!sim.lockUserAthlete) {
       if (this.hit('switch')) sim.switchAthlete(sim.userControlsSide, 1);
       if (this.hit('gk')) sim.toggleGoalkeeperControl();
+    }
+
+    // Penalty shootout: UP / DOWN picks a side of the goal - the goal mouth runs
+    // up and down the screen in the landscape pool - and SHOOT takes the kick.
+    // On their kicks the same keys pick the keeper's dive.
+    if (sim.state === MATCH_STATE.SHOOTOUT) {
+      let syin = 0;
+      if (this.isDown('up')) syin -= 1;
+      if (this.isDown('down')) syin += 1;
+      if (this.stick.active && Math.abs(this.stick.y) > 0.4) syin = Math.sign(this.stick.y);
+      const flip = this.renderer?.flip ?? (sim.attackDir[sim.userControlsSide] < 0);
+      const s = flip ? -1 : 1;
+      sim.shootoutControl({
+        side: syin === 0 ? 0 : Math.sign(s * syin),   // world x, as worldToScreen maps it
+        screen: syin,
+        shoot: this.hit('action1') || this.hit('action2'),
+      });
+      this._clear();
+      return cmd;
     }
 
     const a = sim.userAthlete;
@@ -321,6 +341,11 @@ export class Input2D {
           if (pass === 'cone' && align < 0.35) continue;
           score += align * 6.0;
         }
+        // Among the team-mates you are pointing at, the open one. The pick used
+        // to ignore defenders entirely, so Z threw into a marked man as happily
+        // as a free one: measured, one pass in six was picked off.
+        const opp = sim.activeAthletes(sim.opponentSide(passer.side));
+        score += laneOpenness(passer.pos, m.pos, opp).open * 2.2;
         // Prefer forward and open team-mates.
         const goalZ = passer.attackDir * (sim.profile.field.length / 2);
         score += clamp01((Math.abs(goalZ - passer.pos.z) - Math.abs(goalZ - m.pos.z)) / 6) * 0.8;

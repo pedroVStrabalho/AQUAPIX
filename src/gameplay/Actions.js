@@ -354,10 +354,16 @@ export function goalAimPoint(profile, attackDir, aim) {
 export function resolveShot(shooter, aimPoint, opts) {
   const {
     type = SHOT_TYPES.POWER, charge = 0.6, timing = 1, opponents = [], rng,
-    goalkeeper = null, profile,
+    goalkeeper = null, profile, breakaway = false,
   } = opts;
   const attr = shooter.player.attr;
   const from = shooter.handPoint();
+
+  // Alone with the keeper on the counter: aim inside the posts, not at them.
+  if (breakaway && profile?.field) {
+    const half = profile.field.goalWidth / 2;
+    aimPoint = { ...aimPoint, x: clamp(aimPoint.x, -half * 0.62, half * 0.62), y: clamp(aimPoint.y, 0.25, 0.75) };
+  }
 
   const dx = aimPoint.x - from.x;
   const dy = aimPoint.y - from.y;
@@ -460,6 +466,7 @@ export function resolveShot(shooter, aimPoint, opts) {
   }
   if (type === SHOT_TYPES.PENALTY) errRad *= lerp(1.35, 0.85, a01(attr.penaltyComposure)) * (shooter.has('penaltySpecialist') ? 0.85 : 1);
   if (type === SHOT_TYPES.DESPERATION) errRad *= 1.9;
+  if (breakaway) errRad = Math.min(errRad, 0.02);   // ~6cm at three metres
 
   // --- Flight ------------------------------------------------------------
   const yaw = Math.atan2(dx, dz) + rng.gauss(0, errRad);

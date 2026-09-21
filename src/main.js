@@ -172,7 +172,8 @@ class Game {
       this.sim.start();
       this._applyDrill();
       loading.remove();
-      this.screens.toast(this.sim.lockUserAthlete ? 'You control YOUR player only · WASD move · SPACE shoot/steal · J pass' : 'WASD move · SPACE shoot/steal · J pass · auto-switch on', 4200);
+      this.screens.toast((this.sim.lockUserAthlete ? 'You control YOUR player only · ' : '') +
+        'WASD move · X / SPACE shoot · Z pass · C lob · defending: X steal, Z block, SPACE foul', 4200);
     }, 40));
   }
 
@@ -503,4 +504,8 @@ function loadJson(k, f) { try { const r = localStorage.getItem(k); return r ? JS
 
 const game = new Game();
 game.bootMenu();
+// Development only: reach the running game from the browser console to set up
+// situations (a shootout, a counter) without playing a whole match first. Vite
+// strips this branch from production builds.
+if (import.meta.env.DEV) window.__aquapix = game;
 window.AQUAPIX = game;

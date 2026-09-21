@@ -146,6 +146,13 @@ export class MatchHUD {
     // Control bar - context aware.
     this._updateControls(a);
 
+    // Shootout: tell the player exactly what to do, for as long as they need to.
+    if (sim.shootoutPrompt) {
+      if (this.toast.textContent !== sim.shootoutPrompt) this.toast.textContent = sim.shootoutPrompt;
+      this.toast.classList.add('show');
+      this._toastTimer = 0.25;
+    }
+
     // Timers.
     this.bannerTimer -= dt; if (this.bannerTimer <= 0) this.banner.classList.remove('show');
     this._toastTimer -= dt; if (this._toastTimer <= 0) this.toast.classList.remove('show');
@@ -155,7 +162,9 @@ export class MatchHUD {
     const sim = this.sim;
     const touch = 'ontouchstart' in window;
     let items;
-    if (!a) {
+    if (sim.state === 'shootout') {
+      items = [['↑ / ↓', 'Pick a corner  ·  or dive'], ['nothing', 'Middle  ·  or stay'], ['X / SPACE', 'Shoot']];
+    } else if (!a) {
       items = [['—', 'Waiting']];
     } else if (a.hasBall) {
       items = touch
@@ -168,7 +177,7 @@ export class MatchHUD {
     } else {
       items = touch
         ? [['STEAL', 'tackle'], ['SWITCH', 'nearest']]
-        : [['X', 'Steal'], ['Z', 'Raise arm / block'], ['⇧', 'Press'], ...(sim.lockUserAthlete ? [] : [['E', 'Switch player']])];
+        : [['X', 'Steal'], ['Z', 'Raise arm / block'], ['SPACE', 'Foul (behind = exclusion)'], ['⇧', 'Press'], ...(sim.lockUserAthlete ? [] : [['E', 'Switch player']])];
     }
     this.controls.innerHTML = items.map(([k, d]) => `<span class="mh-ctl"><b>${k}</b>${d}</span>`).join('');
   }

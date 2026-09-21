@@ -52,6 +52,26 @@ const ASSIST_VALUES = {
   fullSim:     { pass: 0.0, shot: 0.0, catchWindow: 0.85, switchAuto: false, indicators: 'minimal', gk: GK_PROFILE.MANUAL },
 };
 
+/**
+ * The result of one shootout kick, from where the ball goes (zone: -1, 0, +1
+ * across the goal) and where the keeper went (dive: -1, 0, +1). Pure, so the
+ * rule can be tested on its own:
+ *
+ *   keeper right way   -> a real chance of a save (a keeper who STAYS in the
+ *                         middle saves almost every shot down the middle)
+ *   keeper wrong way   -> goal, unless the shooter misses the target
+ *   aiming for a corner carries a small risk of missing it entirely
+ */
+export function shootoutOutcome({ zone, dive, placement, gkSkill, rng }) {
+  const missChance = zone === 0 ? 0.02 : lerp(0.12, 0.03, placement);
+  if (rng.chance(missChance)) return 'miss';
+  let saveChance;
+  if (dive === zone) saveChance = zone === 0 ? lerp(0.86, 0.95, gkSkill) : lerp(0.42, 0.62, gkSkill) * lerp(1.15, 0.8, placement);
+  else if (dive === 0) saveChance = lerp(0.06, 0.16, gkSkill) * lerp(1.1, 0.8, placement);   // stayed, stretched for it
+  else saveChance = 0.02;                                                                      // went the wrong way
+  return rng.chance(saveChance) ? 'save' : 'goal';
+}
+
 export class MatchSim {
   /**
    * @param {object} cfg
@@ -483,9 +503,15 @@ export class MatchSim {
         (a.player.attr.penaltyComposure + a.player.attr.shotPlacement + (a.has('penaltySpecialist') ? 40 : 0)))
       .slice(0, Math.max(this.profile.shootout.shootersPerTeam, 5));
 
+    const order = { home: pick('home'), away: pick('away') };
+    // Player Career: your own player always takes one of the kicks.
+    const me = this.lockUserAthlete ? this.userAthlete : null;
+    if (me && me.inPool && !me.isGoalkeeper && !order[me.side].includes(me)) {
+      order[me.side] = [me, ...order[me.side].slice(0, -1)];
+    }
     this.shootout = {
       attempts: [],
-      order: { home: pick('home'), away: pick('away') },
+      order,
       index: { home: 0, away: 0 },
       phase: 'setup',
       timer: 1.2,
@@ -495,6 +521,27 @@ export class MatchSim {
     this.clockRunning = false;
     this._timeline('Penalty shootout.');
     this._log('shootoutStart', {});
+  }
+
+  /**
+   * The human's shootout input for this frame: which side of the goal (-1, 0,
+   * +1 in world x) they are holding, and whether they pressed SHOOT. Written by
+   * Input2D every frame of a shootout.
+   */
+  shootoutControl(input) { this._soInput = input; }
+
+  /** Is the human taking this kick, and/or keeping goal against it? */
+  _shootoutRoles(side, shooter) {
+    const user = this.userControlsSide;
+    if (!user) return { humanShoots: false, humanKeeps: false };
+    // Player Career: you are one athlete, so you take your OWN kick only and the
+    // club's goalkeeper is not yours to steer. Every other mode: you are the
+    // team - you take every one of your team's kicks and keep goal against all
+    // of theirs.
+    if (this.lockUserAthlete) {
+      return { humanShoots: side === user && shooter === this.userAthlete, humanKeeps: false };
+    }
+    return { humanShoots: side === user, humanKeeps: side !== user };
   }
 
   _updateShootout(dt) {
@@ -508,7 +555,29 @@ export class MatchSim {
       onGoal: (ball, sign) => this._onShootoutGoal(sign),
       onEndLine: () => { if (so.phase === 'flight') this._resolveShootoutAttempt(false); },
     });
-    if (so.phase === 'flight') this._resolveSaves(dt);
+    // No _resolveSaves here. The outcome of a penalty is decided when it is
+    // taken, from where the ball is going and where the keeper went; the
+    // physics just has to show it. Letting the open-play save model run as well
+    // is what produced shots down the middle beating a keeper who had not moved.
+    this._shootoutKeeperPose(dt);
+
+    if (so.phase === 'aim') { this._shootoutAim(dt); return; }
+    if (so.phase === 'flight') {
+      // A predetermined save: the keeper takes it before it reaches the line.
+      if (so.outcome === 'save' && !so.resolved && !this.ball.holder) {
+        const gk = this.goalkeeperFor(this.opponentSide(so.current.side));
+        const gz = this.attackDir[so.current.side] * (this.profile.field.length / 2);
+        if (gk && Math.abs(gz - this.ball.pos.z) < 0.9) {
+          gk.pos.x = this.ball.pos.x;
+          this._giveBall(gk);
+          gk.stats.saves++; this.stats[gk.side].saves++;
+          this.presentation.saveFlash = 1;
+          this.bus.emit('save', { gk, outcome: 'controlled' });
+          this._resolveShootoutAttempt(false);
+          return;
+        }
+      }
+    }
 
     so.timer -= dt;
     if (so.timer > 0) return;
@@ -545,28 +614,18 @@ export class MatchSim {
         shooter.pendingPenalty = true;
         this._giveBall(shooter);
         this.presentation.whistle = 1;
-        const gk = this.goalkeeperFor(this.opponentSide(side));
-
-        // The goalkeeper guesses a side and commits. A correct guess against a
-        // less composed shooter is what produces shootout saves - roughly a
-        // quarter to a third, so ties break on their own before the cap.
-        if (gk && this.gkBrain[gk.side]) {
-          const shooterComp = clamp01((shooter.player.attr.penaltyComposure - 10) / 85);
-          const gkSkill = clamp01((gk.player.attr.reactionSpeed + gk.player.attr.setPositioning - 20) / 170);
-          so.gkGuessRight = this.rng.chance(clamp01(0.5 + gkSkill * 0.25 - shooterComp * 0.2));
-          so.gkSaveRoll = this.rng.chance(clamp01((so.gkGuessRight ? 0.55 : 0.08) * (0.7 + gkSkill * 0.6)));
-        } else {
-          so.gkSaveRoll = false;
-        }
-
-        const aim = {
-          x: clamp(this.rng.gauss(0, 0.5), -0.85, 0.85),
-          y: clamp(this.rng.range(0.08, 0.8), 0, 1),
-        };
-        this.tryShot(shooter, aim, SHOT_TYPES.PENALTY, 0.95);
-        shooter.pendingPenalty = false;
-        so.phase = 'flight';
-        so.timer = 2.6;
+        const roles = this._shootoutRoles(side, shooter);
+        so.humanShoots = roles.humanShoots;
+        so.humanKeeps = roles.humanKeeps;
+        so.aimSide = 0;
+        so.dive = null;
+        so.diveX = 0;
+        this._soInput = null;
+        if (so.humanShoots && !this.lockUserAthlete) this.userAthlete = shooter;
+        so.phase = 'aim';
+        // You get a proper moment to pick your corner; the AI shooter gives a
+        // human keeper long enough to read him and choose a side.
+        so.timer = so.humanShoots ? 7 : this.rng.range(1.5, 2.3);
         break;
       }
       case 'flight':
@@ -580,6 +639,112 @@ export class MatchSim {
       default:
         break;
     }
+  }
+
+  /** Aim phase: the shooter picks a corner, the keeper picks a dive. */
+  _shootoutAim(dt) {
+    const so = this.shootout;
+    const input = this._soInput ?? { side: 0, shoot: false };
+    so.timer -= dt;
+
+    if (so.humanShoots) {
+      so.aimSide = input.side;
+      this.shootoutPrompt = 'YOUR PENALTY  ·  hold UP or DOWN to pick a corner (neither = middle)  ·  X / SPACE to shoot';
+      if (input.shoot || so.timer <= 0) this._takeShootoutKick();
+      return;
+    }
+    if (so.humanKeeps) {
+      // Latch the last side you pressed: tap it and let go, it stays chosen.
+      if (input.side !== 0) { so.dive = input.side; so.diveScreen = input.screen; }
+      this.shootoutPrompt = so.dive == null
+        ? 'YOU ARE IN GOAL  ·  press UP or DOWN to dive that way  ·  press nothing to stay in the middle'
+        : `YOU ARE IN GOAL  ·  diving ${so.diveScreen < 0 ? 'UP' : 'DOWN'}  ·  (press the other way to change)`;
+    } else {
+      this.shootoutPrompt = null;
+    }
+    if (so.timer <= 0) this._takeShootoutKick();
+  }
+
+  /**
+   * Take the kick. The result is decided here, from geometry and skill, not
+   * from a coin flip that ignored where the ball went:
+   *
+   *   - the keeper goes the right way  -> a real chance of a save
+   *   - the keeper goes the wrong way  -> goal (unless the shooter misses)
+   *   - down the middle beats a diving keeper but is easy for one who stays
+   *   - aiming for the corner carries a small risk of missing the target
+   */
+  _takeShootoutKick() {
+    const so = this.shootout;
+    const { side, shooter } = so.current;
+    const gk = this.goalkeeperFor(this.opponentSide(side));
+    const rng = this.rng;
+    const a01 = (v) => clamp01((v - 10) / 85);
+    const placement = a01(shooter.player.attr.shotPlacement) * 0.5 + a01(shooter.player.attr.penaltyComposure) * 0.5;
+    const gkSkill = gk ? clamp01((gk.player.attr.reactionSpeed + gk.player.attr.setPositioning - 20) / 170) : 0;
+
+    // Where the shot goes (-1 / 0 / +1 across the goal).
+    let zone;
+    if (so.humanShoots) zone = so.aimSide;
+    else { const r = rng.next(); zone = r < 0.42 ? -1 : r < 0.84 ? 1 : 0; }
+
+    // Where the keeper goes.
+    let dive;
+    if (so.humanKeeps) dive = so.dive ?? 0;
+    else {
+      // A good keeper sometimes reads the shooter; otherwise it is a guess.
+      if (rng.chance(0.10 + gkSkill * 0.14)) dive = zone;
+      else { const r = rng.next(); dive = r < 0.4 ? -1 : r < 0.8 ? 1 : 0; }
+    }
+
+    const outcome = shootoutOutcome({ zone, dive, placement, gkSkill, rng });
+    so.outcome = outcome;
+    so.dive = dive;
+
+    // --- Show it ------------------------------------------------------------
+    const f = this.profile.field;
+    const half = f.goalWidth / 2;
+    const gz = this.attackDir[side] * (f.length / 2);
+    const from = shooter.handPoint();
+    let tx = zone * half * lerp(0.62, 0.8, rng.next());
+    let ty = lerp(0.35, 0.72, rng.next()) * f.goalHeight;
+    so.diveX = dive * half * 0.7;
+    if (outcome === 'miss') { tx = (zone || (rng.chance(0.5) ? 1 : -1)) * (half + 0.35); }
+    else if (outcome === 'save') so.diveX = tx;                    // the keeper gets to it
+    else if (dive === zone && zone !== 0) {
+      // Right way, still beaten: into the top corner, past the fingertips -
+      // not through a keeper standing where the ball goes.
+      tx = zone * half * 0.9; ty = 0.82 * f.goalHeight; so.diveX = dive * half * 0.42;
+    }
+    const dx = tx - from.x, dz = gz - from.z;
+    const flat = Math.hypot(dx, dz);
+    const speed = 16.5;
+    const t = flat / speed;
+    const vy = (ty - from.y) / t + 0.5 * 9.81 * t;
+    shooter.hasBall = false;
+    shooter.pendingPenalty = false;
+    shooter.stats.shots++;
+    this.stats[side].shots++;
+    this.ball.launch(from, { x: dx / flat * speed, y: vy, z: dz / flat * speed }, { x: 0, y: 0, z: 0 }, 'shot', shooter);
+    this._lastShooter = { athlete: shooter, at: this.clockNow };
+    this.bus.emit('shot', { shooter, res: { quality: 0.5 } });
+    this.shootoutPrompt = null;
+    so.phase = 'flight';
+    so.timer = 2.6;
+  }
+
+  /** Put the keeper where they chose to go, so what you see matches the result. */
+  _shootoutKeeperPose(dt) {
+    const so = this.shootout;
+    if (!so?.current) return;
+    const gk = this.goalkeeperFor(this.opponentSide(so.current.side));
+    if (!gk) return;
+    const ownGoal = -gk.attackDir * (this.profile.field.length / 2);
+    const x = so.phase === 'flight' ? so.diveX : 0;
+    gk.pos.x += (x - gk.pos.x) * Math.min(1, dt * (so.phase === 'flight' ? 9 : 4));
+    gk.pos.z = ownGoal + gk.attackDir * 0.3;
+    gk.vel.set(0, 0);
+    if (so.phase === 'flight' && so.dive !== 0) gk.elevation = Math.max(gk.elevation, 0.7);
   }
 
   _positionShootout(side, shooter) {
@@ -614,8 +779,9 @@ export class MatchSim {
   _onShootoutGoal(sign) {
     const so = this.shootout;
     if (!so || so.phase !== 'flight' || so.resolved) return;
-    // A committed keeper who guessed right turns the goal into a save.
-    if (so.gkSaveRoll) {
+    // Safety net: a kick decided as a save or a miss never counts, even if the
+    // ball physically sneaks over the line.
+    if (so.outcome && so.outcome !== 'goal') {
       const gk = this.goalkeeperFor(this.opponentSide(so.current.side));
       if (gk) { gk.stats.saves++; this.stats[gk.side].saves++; this.presentation.saveFlash = 1; }
       this._resolveShootoutAttempt(false);
@@ -629,6 +795,7 @@ export class MatchSim {
     const so = this.shootout;
     if (!so || so.resolved) return;
     so.resolved = true;
+    this.shootoutPrompt = null;
     const { side, shooter } = so.current;
     so.attempts.push({ side, scored, shooter: shooter.id });
     if (scored) {
@@ -821,9 +988,16 @@ export class MatchSim {
       // distances instead of the one metre between two players in a scrum. The
       // receiver's advantage has to cover that range or two thirds of all
       // possessions end in a turnover.
-      const window = ((a.isGoalkeeper ? 0.55 : 0.42) * (a === this.userAthlete ? this.assist.catchWindow : 1) +
+      let window = ((a.isGoalkeeper ? 0.55 : 0.42) * (a === this.userAthlete ? this.assist.catchWindow : 1) +
         a.reach * 0.42 + a.elevation * 0.35 + swim * 0.35 * lerp(0.6, 1, a.freshness)) * intercept +
         (isTarget ? 1.05 : 0);
+      // A pass is only picked off when a defender's hand is genuinely IN its
+      // line. The window above let any opponent within about half a metre of a
+      // passing ball take it - the passer's own marker standing beside him, or
+      // a defender next to the lane - so passes "stopped in the middle" to a
+      // player they were never thrown near. A raised arm in the path still wins
+      // it: that is an obvious interception, and it should be.
+      if (opponentOfPasser && !a.isGoalkeeper) window = 0.26 + a.armRaised * 0.14 + a.elevation * 0.08;
       if (d < window) {
         // Score by how comfortably they reach it, so the swimmer with margin wins.
         const score = (window - d) + swim * 0.25 + (isTarget ? 1.3 : 0);
@@ -901,6 +1075,12 @@ export class MatchSim {
 
   _resolveSaves(dt) {
     if (!this.ball.isLoose) return;
+    // Saves resolve in the same frame as the goal-line check, straight after it.
+    // Once a goal has been given the ball is in the net - it bounces back out,
+    // and the keeper was catching it during the celebration. The player saw a
+    // SAVE flash, the keeper holding the ball, and then a restart from the
+    // centre: "the keeper saves and the game restarts". A goal is final.
+    if (this.state === MATCH_STATE.GOAL) return;
     for (const side of ['home', 'away']) {
       const brain = this.gkBrain[side];
       const gk = this.goalkeeperFor(side);
@@ -938,6 +1118,14 @@ export class MatchSim {
       gk.stats.saves++;
       this.stats[side].saves++;
       this.presentation.saveFlash = 1;
+      // Whatever the keeper did with it - held, tipped, parried or spilled -
+      // that shot has been SAVED, and a save cannot turn into a goal on its own.
+      // Leaving the shooter on record meant a tip that dropped under the bar or
+      // a parry that squirted over the line was still credited to the shot,
+      // counted as a goal, and restarted the match from the centre. Only a new
+      // shot (a put-back rebound goes through tryShot) can score now; a ball the
+      // keeper merely pushes over their own line is a corner throw.
+      this._lastShooter = null;
       this.bus.emit('save', { gk, outcome: res.outcome });
       this._timeline(`Save - #${gk.player.capNumber} ${gk.player.name} (${res.outcome}).`);
 
@@ -953,7 +1141,9 @@ export class MatchSim {
         // the water short of the line, and the "corner" never happened.
         const toLine = Math.abs(gk.pos.z - gz);
         const back = Math.max(5, toLine * 7);
-        const tipVel = { ...res.vel, z: Math.sign(gz - gk.pos.z) * back };
+        // Always UP and over: a tip that left the hand already descending dropped
+        // under the crossbar on its way out and went in.
+        const tipVel = { ...res.vel, y: Math.max(res.vel.y, 3.2), z: Math.sign(gz - gk.pos.z) * back };
         // A keeper who has just punched the ball away cannot turn round and
         // catch it again. Without this they re-gathered their own tip before it
         // crossed, and the corner never happened.
@@ -1388,6 +1578,11 @@ export class MatchSim {
 
   _openTransition(side) {
     this.transitionTimer = 3.2;
+    // Remember the break itself. transitionTimer is a 3.2s AI cue and runs out
+    // long before a counter swum from your own half arrives at the goal - which
+    // meant a player alone three metres out on a genuine break was scored as a
+    // set attack, and could be saved or miss.
+    this.counterBreak = { side, at: this.clockNow };
     this.stats[side].counterOpportunities++;
   }
 
@@ -1471,7 +1666,28 @@ export class MatchSim {
         this.rng.gauss(0, diff.error * 0.5));
     }
 
+    // A genuine breakaway is not a probability question. If you have broken away
+    // on the counter, you are inside five metres, and there is no defender near
+    // enough to touch you, then the ball goes in: the keeper is not consulted
+    // (see _resolveSaves) and the shot is not allowed to fly wide either - a
+    // quick press used to score as poor release timing and the auto-aim went for
+    // the post, so a player alone three metres out could still miss the goal.
+    // In a set attack from the same spot the keeper keeps every chance.
+    const chasers = opponents.filter((o) => !o.isGoalkeeper &&
+      Math.hypot(o.pos.x - shooter.pos.x, o.pos.z - shooter.pos.z) < 3.5).length;
+    // On the break: your team won the ball recently enough that the defence has
+    // not got back (a full-length counter takes six to eight seconds), and no
+    // defender is between you and the goal.
+    const cb = this.counterBreak;
+    const onTheBreak = this.transitionTimer > 0 ||
+      (cb && cb.side === shooter.side && this.clockNow - cb.at < 10);
+    const gzShot = aimPoint.z;
+    const goalside = opponents.some((o) => !o.isGoalkeeper &&
+      Math.abs(gzShot - o.pos.z) < Math.abs(gzShot - shooter.pos.z) && Math.abs(o.pos.x - shooter.pos.x) < 2.5);
+    const breakaway = onTheBreak && distToGoal < 5.0 && chasers === 0 && !goalside;
+
     const res = resolveShot(shooter, aimPoint, {
+      breakaway,
       type: shotType, charge, timing, opponents, rng: this.rng,
       goalkeeper: gk, profile: this.profile, shotClock: this.shotClock,
     });
@@ -1489,15 +1705,7 @@ export class MatchSim {
     this.ball.intendedReceiver = null;
     this.ball.launch(res.from, res.vel, res.spin, 'shot', shooter);
 
-    // A genuine breakaway is not a probability question. If you have broken away
-    // on the counter, you are inside five metres, and there is no defender near
-    // enough to touch you, then a goalkeeper stopping it is not something that
-    // happens in water polo - so the save model is not consulted. In a set
-    // attack from the same spot the keeper still has every chance; what makes
-    // this different is that nobody is there to make the shot difficult.
-    const chasers = opponents.filter((o) => !o.isGoalkeeper &&
-      Math.hypot(o.pos.x - shooter.pos.x, o.pos.z - shooter.pos.z) < 3.5).length;
-    this.ball.breakaway = this.transitionTimer > 0 && distToGoal < 5.0 && chasers === 0;
+    this.ball.breakaway = breakaway;
 
     this.lastShot = res;
     // Remember who shot, so a shot that goes in off a keeper's hand or a
@@ -1537,12 +1745,28 @@ export class MatchSim {
 
     const d = dist2(defender.pos, carrier.pos);
     const ballD = this.ball.distanceTo(defender.pos.x, 0.25, defender.pos.z);
-    if (ballD > defender.reach + 0.5) return false;
+    const reachMax = defender.reach + 0.5;
+    if (ballD > reachMax) return false;
 
+    // The old formula SUBTRACTED ball security from steal timing, so two average
+    // players cancelled out and every other term was a few per cent: measured,
+    // a defender face to face at 0.6m succeeded 1.5% of the time, and 0% from
+    // 1.2m. That is about seventy presses per steal - it existed on paper only.
+    //
+    // A steal is now a real, skill-shaped chance: best when you are right on the
+    // ball and it is on your side of his body, better still if he has just
+    // caught it or is swimming with it, and shaped by your timing against his
+    // ball security rather than cancelled by it. A mistimed swipe still costs
+    // you: you are left stranded for a moment, and the contact can be a foul.
     const timing = clamp01((defender.player.attr.stealTiming - 10) / 85);
     const security = clamp01((carrier.player.attr.ballSecurity - 10) / 85);
-    const p = clamp01(0.38 * timing - 0.48 * security + 0.18 * (1 - clamp01(ballD / 1.2)) +
-      (carrier.speed > 2.4 ? 0.08 : 0) - carrier.freshness * 0.08 + defender.freshness * 0.08);
+    const closeness = clamp01(1 - (ballD - 0.35) / Math.max(0.3, reachMax - 0.35));
+    const exposure = clamp01(0.5 + (d - ballD) / 0.6);   // ball nearer you than his body is
+    let p = 0.34 * closeness ** 1.6 * lerp(0.55, 1.2, exposure)
+      * lerp(0.6, 1.25, timing) * lerp(1.3, 0.6, security);
+    if (carrier.speed > 2.4) p += 0.05;
+    if (carrier.justCaught > 0) p += 0.10;
+    p = clamp(p * lerp(0.85, 1.1, defender.freshness), 0, 0.45);
 
     if (this.rng.chance(p)) {
       carrier.hasBall = false;

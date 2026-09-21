@@ -311,7 +311,8 @@ const SCREENS = {
     const rows = [
       ['W A S D', 'Swim and orient the body', 'Drive, cut, reposition', 'Mark and recover', 'Position in goal'],
       ['Z', 'Pass', 'Call for the pass', 'Raise arm / block', 'Short outlet'],
-      ['X  (or Space)', 'Shoot', 'Contextual one-touch', 'Timed steal', 'Aggressive save'],
+      ['X', 'Shoot', 'Contextual one-touch', 'Steal - best right on the ball', 'Aggressive save'],
+      ['Space', 'Shoot', '-', 'Foul your man - in front: free throw, behind: exclusion', '-'],
       ['C', 'Lob pass - lofted over a defender', 'Request a lead pass', '-', 'Long outlet'],
       ['Shift', 'Sprint - needs 70% readiness', 'Sprint into space', 'Recovery sprint', 'Explosive rise when set'],
       ['L', 'Pump fake, skip-shot modifier', 'Call teammate movement', 'Raise arm / block (alt)', 'Block modifier'],
@@ -319,6 +320,7 @@ const SCREENS = {
       ['E', 'Switch player', 'Switch player', 'Switch controlled defender', '-'],
       ['G', 'Toggle goalkeeper control', '-', '-', 'Take manual control'],
       ['Arrows or mouse', 'Aim the shot or pass', 'Direction feint', 'Manual arm and steal direction', 'Manual save direction'],
+      ['Shootout', 'UP / DOWN pick a corner, X or Space to shoot', '-', '-', 'UP / DOWN pick your dive - nothing stays in the middle'],
     ];
 
     const table = el('table', 'data');
