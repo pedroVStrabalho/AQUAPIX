@@ -146,11 +146,15 @@ class Game {
         this.sim.ai[opts.careerSide].tactics = this.sim.tactics[opts.careerSide];
       }
 
-      // Player career: make sure YOU are on the field, control ONLY you.
+      // Player career: make sure YOUR athlete is in the starting seven. The match
+      // itself plays exactly like Quick Match - whole team, auto-switching, the
+      // same shootout. Locked to one athlete you had the ball 5% of the time
+      // (against 26% in Quick Match), spent 29% of every match watching a
+      // team-mate hold it, and were always steering the weakest player in the
+      // pool. Your athlete still starts, you start the match on him, and his
+      // goals, assists and rating still drive the career.
       if (opts.userPlayerId) {
         this._ensurePlayerStarts(opts.userSide, opts.userPlayerId);
-        this.sim.lockUserAthlete = true;
-        this.sim.autoSwitch = false;
       }
 
       this.onMatchEnd = opts.onEnd;
@@ -172,8 +176,7 @@ class Game {
       this.sim.start();
       this._applyDrill();
       loading.remove();
-      this.screens.toast((this.sim.lockUserAthlete ? 'You control YOUR player only · ' : '') +
-        'WASD move · X / SPACE shoot · Z pass · C lob · defending: X steal, Z block, SPACE foul', 4200);
+      this.screens.toast('WASD move · X / SPACE shoot · Z pass · C lob · defending: X steal, Z block, SPACE foul', 4200);
     }, 40));
   }
 
@@ -238,18 +241,24 @@ class Game {
   // Player Career
   // =======================================================================
   startPlayerCareer(draft) {
-    this.playerLeague = generateLeague(Math.floor(Math.random() * 1e9));
+    // Keep the seed: the save used to record a fixed 20260727 while the league
+    // was built from a random one, so after a reload you came back to a
+    // different league - other rosters, other opponents - from the one you
+    // started your career in.
+    this.playerLeagueSeed = Math.floor(Math.random() * 1e9);
+    this.playerLeague = generateLeague(this.playerLeagueSeed);
     this.player = new PlayerCareer(this.playerLeague, draft);
     this.savePlayerCareer();
     this.screens.show('playerHub');
   }
   resumePlayerCareer(data) {
-    this.playerLeague = generateLeague(data.leagueSeed ?? 20260727);
+    this.playerLeagueSeed = data.leagueSeed ?? 20260727;
+    this.playerLeague = generateLeague(this.playerLeagueSeed);
     this.player = PlayerCareer.restore(this.playerLeague, data);
     this.screens.show('playerHub');
   }
   savePlayerCareer() {
-    if (this.player) saveJson(SAVE_PLAYER, { ...this.player.serialise(), leagueSeed: 20260727 });
+    if (this.player) saveJson(SAVE_PLAYER, { ...this.player.serialise(), leagueSeed: this.playerLeagueSeed ?? 20260727 });
   }
   loadPlayerSave() { return loadJson(SAVE_PLAYER, null); }
 
