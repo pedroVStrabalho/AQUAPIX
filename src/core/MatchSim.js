@@ -1059,7 +1059,10 @@ export class MatchSim {
       // possessions lost from a pass were opponents collecting these, not
       // genuine interceptions.
       const away = this.rng.range(0, Math.PI * 2);
-      const s = result.outcome === 'deflection' ? 1.2 : 0.55;
+      // Keep a fumble AT his hands. At 1.2 m/s the ball squirted a clear metre
+      // away and died there, which is what it looks like when a pass "stops in
+      // the middle" just short of the man.
+      const s = result.outcome === 'deflection' ? 0.75 : 0.45;
       // As with a block: a fumble near your own line should not be as likely to
       // trickle into your own net as to go anywhere else.
       const ownGoalZ = -best.attackDir * (this.profile.field.length / 2);

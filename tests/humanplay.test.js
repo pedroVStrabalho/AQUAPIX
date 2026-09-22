@@ -364,3 +364,37 @@ test('SWITCH gives you the man nearest the ball, then the next nearest, then bac
   assert.ok(n >= 50, `situations tested (${n})`);
   assert.ok(ok / n > 0.85, `SWITCH follows the ball, not the roster order (${ok}/${n})`);
 });
+
+test('a pass reaches the man: the receiver does not knock his own ball away', () => {
+  // The catch model multiplied seven penalties together, so a receiver who was
+  // turning, tired and marked came out near 0.6 and fumbled two routine passes
+  // in five. Measured over real matches, 14% of EVERY pass ended with the
+  // receiver knocking his own ball into the water short of himself - which is
+  // what "the pass stops in the middle" looks like from the player's seat.
+  let thrown = 0, intoHands = 0, knockedAway = 0;
+  for (let m = 0; m < 4; m++) {
+    const { sim, frame } = match(4000 + m, ['kraken', 'solaris', 'atlas', 'obsidian'][m]);
+    let live = null;
+    sim.bus.on('pass', ({ passer, res }) => {
+      const r = sim.ball.intendedReceiver;
+      live = (!r || res.distance < 2) ? null : { r, passer, done: false, touched: false };
+    });
+    playAsHuman(sim, frame, 60 * 6, () => {
+      if (!live || live.done) return;
+      const b = sim.ball;
+      if (b.lastHolder && b.lastHolder !== live.passer) live.touched = true;
+      if (b.holder) { if (b.holder === live.r) intoHands++; thrown++; live.done = true; return; }
+      if (b.pos.y <= 0.08 && b.timeSinceLoose > 0.08) {
+        thrown++;
+        const d = Math.hypot(b.pos.x - live.r.pos.x, b.pos.z - live.r.pos.z);
+        if (live.touched && d > 1.2) knockedAway++;
+        live.done = true;
+      }
+    });
+  }
+  assert.ok(thrown > 300, `passes measured (${thrown})`);
+  assert.ok(knockedAway / thrown < 0.09,
+    `the receiver rarely knocks his own ball away (${(knockedAway / thrown * 100).toFixed(1)}%)`);
+  assert.ok(intoHands / thrown > 0.6,
+    `most passes go straight into his hands (${(intoHands / thrown * 100).toFixed(1)}%)`);
+});

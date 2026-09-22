@@ -97,6 +97,49 @@ export function laneOpenness(from, to, opponents, exclude = null) {
 // Passing
 // ---------------------------------------------------------------------------
 
+
+/**
+ * The rise a throw needs to ARRIVE, against the ball's real air drag.
+ *
+ * A drag-free ballistic solve is not good enough here. The ball carries
+ * quadratic drag (k ~ 0.026 v^2, about 6 m/s^2 at 15 m/s) and that damps the
+ * VERTICAL speed as well, so the ball tops out lower and drops earlier than the
+ * clean parabola predicts. Measured in an empty pool with a stationary
+ * receiver, passes were landing a metre short of the man every single time -
+ * the "ball stops in the middle" - and only 43-70% were caught.
+ *
+ * So the trajectory is integrated with the same drag the ball itself uses, and
+ * the launch rise is searched for: the smallest rise that still has the ball at
+ * or above the receiver's hands when it gets there.
+ */
+const THROW_DRAG_K = 0.0259;   // 0.5 * rho_air * Cd * A / m, matching Ball.js
+
+function riseToArrive(y0, targetY, flat, horiz) {
+  const fly = (vy) => {
+    let x = 0, y = y0, vx = horiz, v = vy;
+    const dt = 1 / 120;
+    for (let i = 0; i < 480; i++) {
+      const sp = Math.hypot(vx, v) || 1e-6;
+      const damp = 1 / (1 + THROW_DRAG_K * sp * dt);
+      v = (v - 9.81 * dt) * damp;
+      vx *= damp;
+      x += vx * dt;
+      y += v * dt;
+      if (x >= flat) return { arrived: true, y };
+      if (y <= 0.02) return { arrived: false, y };
+    }
+    return { arrived: false, y };
+  };
+  let lo = 0, hi = 11;
+  if (fly(hi).arrived === false && fly(hi).y < targetY) return hi;
+  for (let i = 0; i < 20; i++) {
+    const mid = (lo + hi) / 2;
+    const r = fly(mid);
+    if (r.arrived && r.y >= targetY) hi = mid; else lo = mid;
+  }
+  return hi;
+}
+
 /**
  * Resolve a pass. Returns a record describing the launch and the factors used.
  * The caller launches the ball; this function does not mutate world state beyond
@@ -209,24 +252,19 @@ export function resolvePass(passer, target, opts) {
   // to arrive inside that flat trajectory instead.
   if (type !== PASS_TYPES.LOB) {
     const flat = distance * distErr;
-    // The arc we WANT: low enough that it never reads as a lob.
-    const apexRise = clamp(0.10 + flat * 0.020, 0.10, 0.40);
-    const vyFlat = Math.sqrt(2 * 9.81 * apexRise);
-    const tFlat = Math.max(0.16,
-      vyFlat / 9.81 + Math.sqrt(2 * Math.max(0.05, from.y + apexRise - targetY) / 9.81));
-
-    // Throwing it flat over a long distance demands a speed no human has - the
-    // uncapped solve asked for 23 m/s at 8m and 32 m/s at 12m, which is faster
-    // than a shot. A pass must never outrun a shot, so the speed is capped and
-    // any arc physics still demands beyond that is accepted.
-    const PASS_SPEED_CAP = 15.5;   // stays under the 17.5 m/s shot floor
-    horiz = clamp(Math.max(horiz, flat / tFlat), 4, PASS_SPEED_CAP);
-
-    // Re-solve the rise for the speed actually used, so the ball still arrives.
-    const tReal = flat / Math.max(4, horiz * 0.88);
-    launchY = (targetY - from.y) / tReal + 0.5 * 9.81 * tReal;
+    // How hard this athlete actually throws it. Capping every pass at a single
+    // speed made a soft pass and a driven one identical beyond about six
+    // metres, which is why power stopped mattering at all.
+    const PASS_SPEED_CAP = 15.5;   // a pass must never outrun a shot
+    horiz = clamp(horiz, 4, PASS_SPEED_CAP);
+    // ...and the rise that gets it there at that speed, against real drag.
+    //
+    // Arriving at hand height measured best: lofting it above his hands to keep
+    // it over the traffic cut interceptions but cost more completions than it
+    // saved, because the ball then drops behind him and has to be chased.
+    launchY = riseToArrive(from.y, targetY, flat, horiz);
     if (type === PASS_TYPES.HIGH_DRY || type === PASS_TYPES.LOB_RELEASE) launchY += 2.4;
-    if (type === PASS_TYPES.SKIP) launchY -= 1.1;
+    if (type === PASS_TYPES.SKIP) launchY = Math.max(0, launchY - 1.1);
     if (wet) launchY = Math.min(launchY, 1.4);
   }
 
@@ -299,14 +337,22 @@ export function resolveCatch(receiver, ball, rng, opts = {}) {
 
   // Elite athletes catch almost everything that is thrown at them properly; the
   // interesting failures come from pressure, speed, reach and the weak side.
-  let p = 0.85 + 0.14 * factors.catchSkill;
-  p *= lerp(0.70, 1.0, factors.facing);
-  p *= lerp(0.82, 1.0, factors.freshness);
-  p *= 1 - factors.pressure * 0.38;
-  p *= 1 - factors.weakSide;
-  p *= lerp(1.0, 0.80, clamp01((relSpeed - 13) / 10));  // a driven pass is harder
-  p *= lerp(1.0, 0.78, clamp01((gap - 0.55) / 0.95));   // reach catches are harder
-  if (factors.wetCatch) p *= lerp(0.84, 1.0, a01(attr.wetPassControl));
+  // Seven penalties multiplied together fall away faster than any one of them
+  // suggests: a receiver who was turning, a little tired and marked came out
+  // around 0.6, so he fumbled a routine pass two times in five. Measured over
+  // real matches, 14% of EVERY pass ended with the receiver knocking his own
+  // ball into the water - from the player's seat, the ball "stopping in the
+  // middle" just short of the man. An open athlete in clear water catches what
+  // is thrown to him; pressure, speed and reach still cost, but they no longer
+  // stack into a coin flip.
+  let p = 0.90 + 0.09 * factors.catchSkill;
+  p *= lerp(0.86, 1.0, factors.facing);
+  p *= lerp(0.92, 1.0, factors.freshness);
+  p *= 1 - factors.pressure * 0.22;
+  p *= 1 - factors.weakSide * 0.5;
+  p *= lerp(1.0, 0.90, clamp01((relSpeed - 13) / 10));  // a driven pass is harder
+  p *= lerp(1.0, 0.88, clamp01((gap - 0.55) / 0.95));   // reach catches are harder
+  if (factors.wetCatch) p *= lerp(0.92, 1.0, a01(attr.wetPassControl));
   if (receiver.hasBall) p = 1;
   p = clamp01(p);
 
@@ -319,8 +365,8 @@ export function resolveCatch(receiver, ball, rng, opts = {}) {
   const fail = 1 - p;
   if (roll < p * 0.70) outcome = factors.wetCatch ? 'wetCollection' : (gap > 0.55 ? 'reachCatch' : 'clean');
   else if (roll < p) outcome = factors.elevation > 0.5 ? 'highCatch' : 'delayedControl';
-  else if (roll < p + fail * 0.45) outcome = 'bobble';
-  else if (roll < p + fail * 0.65) outcome = 'deflection';
+  else if (roll < p + fail * 0.62) outcome = 'bobble';   // stays at his hands
+  else if (roll < p + fail * 0.78) outcome = 'deflection';
   else outcome = 'drop';
 
   // A delayed control is still a catch - the athlete simply needs an extra beat
