@@ -1007,7 +1007,16 @@ export class MatchSim {
     if (!best) return;
 
     const opp = this.activeAthletes(this.opponentSide(best.side));
-    const result = resolveCatch(best, b, this.rng, { pressure: pressureOn(best, opp) });
+    let result = resolveCatch(best, b, this.rng, { pressure: pressureOn(best, opp) });
+    // A goalkeeper GATHERING a loose ball holds it. Stopping a shot is the save
+    // model's business, and spilling one there is a real outcome; but here the
+    // keeper was fumbling ordinary pickups in his own goal mouth with an
+    // outfielder's catch reliability - about four times a match, sometimes twice
+    // in a row - bobbling it around in front of his own net until an opponent
+    // arrived and scored. The safest hands in the team do not do that.
+    if (best.isGoalkeeper && !result.controlled && b.speed < 9) {
+      result = { ...result, controlled: true, outcome: 'clean' };
+    }
     const intended = b.intendedReceiver;
 
     if (result.controlled) {
@@ -1114,6 +1123,27 @@ export class MatchSim {
       const manual = (this.userGkControl && this.userAthlete === gk) ? this.userCommand.saveAim : null;
       const res = attemptSave(gk, this.ball, brain, this.rng, { manualDirection: manual });
       if (!res) continue;
+
+      // A slow ball is GATHERED, not saved. The save model spills about a
+      // quarter of everything by design - right for a shot, absurd for a ball
+      // rolling gently at the keeper: he parried it a metre away, it drifted
+      // back, he parried it again, until an opponent arrived and scored. Held,
+      // and only a real shot counts as a save or flashes SAVE.
+      if (this.ball.speed < 7) {
+        const wasShot = this.ball.kind === 'shot';
+        const changesHands = this.possession !== side;
+        this._lastShooter = null;
+        this._giveBall(gk);
+        if (changesHands || wasShot) {
+          this._applyShotClock(shotClockAfter(this.profile, POSSESSION_EVENT.GAIN));
+          this._openTransition(side);
+        }
+        if (wasShot) {
+          gk.stats.saves++; this.stats[side].saves++;
+          this.bus.emit('save', { gk, outcome: 'controlled' });
+        }
+        return;
+      }
 
       gk.stats.saves++;
       this.stats[side].saves++;
@@ -1565,6 +1595,10 @@ export class MatchSim {
     this.shotClockArmed = false;   // re-armed when this team touches the ball
     this.roleDirty = true;
     if (previous) this._tickExclusions(0, { possessionRegained: side });
+    // Any change of possession in open play can start a break - including a
+    // goal throw after a missed shot, which never went through _openTransition.
+    // A centre restart after a goal is a set play, not a counter.
+    if (previous && event !== POSSESSION_EVENT.GOAL) this.counterBreak = { side, at: this.clockNow };
     this.bus.emit('possession', { side, previous, event });
     this._log('possession', { side, event });
     if (this._extraPlayerAttack && this._extraPlayerAttack !== side) this._extraPlayerAttack = null;
@@ -1673,8 +1707,20 @@ export class MatchSim {
     // quick press used to score as poor release timing and the auto-aim went for
     // the post, so a player alone three metres out could still miss the goal.
     // In a set attack from the same spot the keeper keeps every chance.
-    const chasers = opponents.filter((o) => !o.isGoalkeeper &&
-      Math.hypot(o.pos.x - shooter.pos.x, o.pos.z - shooter.pos.z) < 3.5).length;
+    // Only a defender who can still get between you and the goal counts. On a
+    // real counter somebody is nearly always chasing BEHIND you - the old
+    // "nobody within 3.5m in any direction" test let that trailing swimmer
+    // switch the whole rule off, so a player alone in front of the keeper at
+    // three metres was scored as a set attack and could miss.
+    const toGoalX = aimPoint.x - shooter.pos.x, toGoalZ = aimPoint.z - shooter.pos.z;
+    const toGoalLen = Math.hypot(toGoalX, toGoalZ) || 1;
+    const chasers = opponents.filter((o) => {
+      if (o.isGoalkeeper) return false;
+      const dx = o.pos.x - shooter.pos.x, dz = o.pos.z - shooter.pos.z;
+      const d = Math.hypot(dx, dz);
+      const ahead = (dx * toGoalX + dz * toGoalZ) / toGoalLen;   // metres goalward of you
+      return d < 2.2 && ahead > -0.6;                          // level with you or in front, within reach
+    }).length;
     // On the break: your team won the ball recently enough that the defence has
     // not got back (a full-length counter takes six to eight seconds), and no
     // defender is between you and the goal.

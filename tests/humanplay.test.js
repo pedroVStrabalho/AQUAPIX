@@ -261,3 +261,74 @@ test('shootout: you take every one of your kicks, aim them, and keep goal agains
   assert.equal(aimedUp, mine, 'every kick went to the corner the human picked');
   assert.equal(humanKept, theirs, 'the human kept goal against every one of theirs');
 });
+
+test('a counter with a defender chasing on your back still ends in a goal', () => {
+  // The break used to demand nobody within 3.5m in ANY direction, so the
+  // defender trailing behind you - who is always there on a counter - switched
+  // it off. Only a defender level with you or goalside counts. The break here
+  // also starts the way a goal throw after a missed shot does: possession just
+  // changes hands, without the steal/save transition.
+  let goals = 0, n = 0;
+  for (let t = 0; t < 20; t++) {
+    const { sim, frame } = match(7400 + t);
+    for (let i = 0; i < 2000 && !sim.isLive(); i++) frame();
+    const me = sim.activeAthletes('home').find((a) => !a.isGoalkeeper);
+    sim.setUserAthlete(me);
+    const gz = me.attackDir * sim.profile.field.length / 2;
+    for (const s of ['home', 'away']) {
+      for (const a of sim.activeAthletes(s)) {
+        if (a === me || a.isGoalkeeper) continue;
+        a.pos.x = ((t * 5 + a.id.length) % 8) - 4; a.pos.z = -gz * 0.75; a.vel.set(0, 0);
+      }
+    }
+    const chaser = sim.activeAthletes('away').find((a) => !a.isGoalkeeper);
+    me.pos.x = 0; me.pos.z = -gz * 0.55; me.vel.set(0, 0);
+    sim._giveBall(me);
+    sim.possession = 'away'; sim._setPossession('home', 'restart');
+    let out = null, shot = false;
+    sim.bus.on('goal', () => { out ??= 'goal'; });
+    sim.bus.on('save', () => { out ??= 'save'; });
+    const k = me.attackDir > 0 ? 'KeyD' : 'KeyA';
+    for (let i = 0; i < 60 * 14 && !out; i++) {
+      if (!shot) {
+        fire('keydown', k);
+        if (!me.hasBall) break;
+        chaser.pos.x = me.pos.x + 0.3; chaser.pos.z = me.pos.z - me.attackDir * 1.1; chaser.vel.set(0, 0);
+        if (Math.abs(gz - me.pos.z) < 3.2) {
+          fire('keyup', k); fire('keydown', 'KeyX'); frame(); fire('keyup', 'KeyX'); shot = true; n++; continue;
+        }
+      }
+      frame();
+    }
+    fire('keyup', k);
+    if (out === 'goal') goals++;
+  }
+  assert.ok(n >= 15, `the counters reached shooting range (${n})`);
+  assert.ok(goals / n >= 0.9, `alone in front of the keeper on the break is a goal, chaser or not (${goals}/${n})`);
+});
+
+test('a keeper gathering a loose ball holds it - no bobbling in front of his own net', () => {
+  // Keepers were fumbling ordinary pickups with an outfielder's catch
+  // reliability, about four times a match, sometimes twice in a row, until an
+  // opponent arrived and scored.
+  let pickups = 0, fumbles = 0;
+  for (let t = 0; t < 80; t++) {
+    const { sim, frame } = match(8800 + t);
+    for (let i = 0; i < 2000 && !sim.isLive(); i++) frame();
+    const gk = sim.goalkeeperFor('home');
+    for (const s of ['home', 'away']) {
+      for (const a of sim.activeAthletes(s)) { if (!a.isGoalkeeper) { a.pos.x = 9; a.pos.z = 0; a.vel.set(0, 0); } }
+    }
+    // A slow ball drifting to the keeper, last touched by an opponent.
+    const opp = sim.activeAthletes('away').find((a) => !a.isGoalkeeper);
+    sim.ball.launch({ x: gk.pos.x + 0.9, y: 0.3, z: gk.pos.z + gk.attackDir * 0.9 },
+      { x: -1.5, y: 0.5, z: -gk.attackDir * 1.5 }, { x: 0, y: 0, z: 0 }, 'deflection', opp);
+    let fumbled = false;
+    const orig = sim.ball.launch.bind(sim.ball);
+    sim.ball.launch = (f, v, sp, kind, by) => { if (kind === 'deflection' && by === gk) fumbled = true; return orig(f, v, sp, kind, by); };
+    for (let i = 0; i < 90 && sim.ball.holder !== gk; i++) frame();
+    if (sim.ball.holder === gk || fumbled) { pickups++; if (fumbled) fumbles++; }
+  }
+  assert.ok(pickups >= 40, `the keeper reached the ball (${pickups})`);
+  assert.equal(fumbles, 0, `and never bobbled it (${fumbles}/${pickups})`);
+});

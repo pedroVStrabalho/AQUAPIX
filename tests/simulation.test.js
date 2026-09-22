@@ -359,14 +359,17 @@ test('stamina degrades measurably across a match', () => {
   sim.start();
   const tracked = sim.activeAthletes('home').filter((a) => !a.isGoalkeeper);
   const before = tracked.map((a) => a.freshness);
-  play(sim, 400);
+  // Fatigue builds through a period and recovers at the breaks, so it is read
+  // across the whole run: a snapshot at one fixed second can land just after an
+  // interval, when it has legitimately recovered.
+  let peakFatigue = 0;
+  play(sim, 400, () => { for (const a of tracked) peakFatigue = Math.max(peakFatigue, a.matchFatigue); });
   const stillIn = tracked.filter((a) => a.inPool && sim.active.home.includes(a));
   if (stillIn.length) {
     const dropped = stillIn.some((a, i) => a.freshness < before[tracked.indexOf(a)]);
     assert.ok(dropped, 'at least one athlete is more tired than when they started');
   }
-  const anyFatigue = tracked.some((a) => a.matchFatigue > 0.01);
-  assert.ok(anyFatigue, 'match fatigue accumulated');
+  assert.ok(peakFatigue > 0.1, `match fatigue accumulated during play (peak ${peakFatigue.toFixed(3)})`);
 });
 
 test('the match record is written and can be replayed deterministically', () => {
