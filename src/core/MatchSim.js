@@ -2079,8 +2079,16 @@ export class MatchSim {
     if (this.lockUserAthlete) return;  // you are locked to your own player
     const list = this.activeAthletes(side).filter((a) => !a.isGoalkeeper);
     if (!list.length) return;
-    const i = list.indexOf(this.userAthlete);
-    const next = list[(i + direction + list.length) % list.length];
+
+    // SWITCH gives you the man nearest the ball. Press it again and you get the
+    // next nearest - you pressed to get OUT of the one you had - and a third
+    // press brings you back to the nearest. It used to walk the squad list in
+    // roster order, so it handed you whoever happened to be next in the array,
+    // wherever they were in the pool.
+    const ball = this.ball;
+    const dTo = (a) => ball.distanceTo(a.pos.x, 0.25, a.pos.z);
+    const ranked = list.slice().sort((a, b) => dTo(a) - dTo(b));
+    const next = ranked[0] === this.userAthlete ? (ranked[1] ?? ranked[0]) : ranked[0];
     this.setUserAthlete(next);
     this.manualSwitchCooldown = 1.2;  // let the manual pick stick for a moment
   }
@@ -2102,6 +2110,10 @@ export class MatchSim {
     const ball = this.ball;
 
     if (attacking) {
+      // A deliberate switch sticks for its cooldown here too. Without this the
+      // carrier-follow reclaimed control on the very next frame, so pressing
+      // SWITCH while attacking did nothing at all.
+      if (this.manualSwitchCooldown > 0) return;
       // Follow the carrier; while a pass is in the air, jump to the receiver.
       if (ball.holder && ball.holder.side === side && !ball.holder.isGoalkeeper) {
         if (this.userAthlete !== ball.holder) this.setUserAthlete(ball.holder);

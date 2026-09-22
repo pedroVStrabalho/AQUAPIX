@@ -332,3 +332,35 @@ test('a keeper gathering a loose ball holds it - no bobbling in front of his own
   assert.ok(pickups >= 40, `the keeper reached the ball (${pickups})`);
   assert.equal(fumbles, 0, `and never bobbled it (${fumbles}/${pickups})`);
 });
+
+test('SWITCH gives you the man nearest the ball, then the next nearest, then back', () => {
+  // It used to walk the squad list in roster order, handing you whoever came
+  // next in the array wherever they were in the pool.
+  let ok = 0, n = 0;
+  for (let t = 0; t < 60; t++) {
+    const { sim, frame } = match(15000 + t);
+    for (let i = 0; i < 3000 && !sim.isLive(); i++) frame();
+    for (let i = 0; i < 60 * (3 + t % 7); i++) frame();
+    if (!sim.isLive() || !sim.userAthlete) continue;
+    const ranked = () => sim.activeAthletes('home')
+      .filter((x) => !x.isGoalkeeper)
+      .sort((x, y) => sim.ball.distanceTo(x.pos.x, 0.25, x.pos.z) - sim.ball.distanceTo(y.pos.x, 0.25, y.pos.z));
+    const rankOf = (a) => ranked().indexOf(a);
+    // Two swimmers can be a few centimetres apart in the scrum and swap rank
+    // between the press and the check; that is a tie, not a wrong pick.
+    const atRank = (a, want) => {
+      const list = ranked();
+      const d = (x) => sim.ball.distanceTo(x.pos.x, 0.25, x.pos.z);
+      return list.indexOf(a) === want || Math.abs(d(a) - d(list[want])) < 0.3;
+    };
+    const press = () => { fire('keydown', 'KeyE'); frame(); fire('keyup', 'KeyE'); return sim.userAthlete; };
+    // Already on the nearest? Then the first press moves you OFF him, which is
+    // the point of pressing it. Otherwise it hands you the nearest.
+    const want = rankOf(sim.userAthlete) === 0 ? [1, 0, 1] : [0, 1, 0];
+    const got = [press(), press(), press()];
+    n++;
+    if (got.every((a, i) => atRank(a, want[i]))) ok++;
+  }
+  assert.ok(n >= 50, `situations tested (${n})`);
+  assert.ok(ok / n > 0.85, `SWITCH follows the ball, not the roster order (${ok}/${n})`);
+});
