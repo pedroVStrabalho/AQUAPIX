@@ -98,6 +98,26 @@ export function laneOpenness(from, to, opponents, exclude = null) {
 // ---------------------------------------------------------------------------
 
 
+
+/**
+ * How long a lob is in the air, and how high it goes. Shared so that the lead
+ * (where the ball is aimed) and the throw itself agree: they used to disagree,
+ * with the lead assuming a fixed fraction of a flat pass's speed, so a lob to a
+ * swimming team-mate dropped in behind or short of him.
+ */
+export function lobFlight(distance, fromY, targetY) {
+  // A lob has to clear a raised arm, not the crossbar. The old arc went up to
+  // three metres and hung there, which is why it crawled: a slow, very high
+  // ball that a moving receiver swims away from.
+  const apex = clamp(1.25 + distance * 0.055, 1.25, 2.1);
+  const rise0 = Math.max(0.25, apex - fromY);
+  const DRAG_COMP = 1.4;   // a drag-free solve tops out well short of the mark
+  const vy = Math.sqrt(2 * 9.81 * rise0) * DRAG_COMP;
+  const fall = Math.sqrt(2 * Math.max(0.05, apex - targetY) / 9.81);
+  const time = Math.max(0.40, vy / 9.81 + fall);
+  return { vy, time, horiz: distance / time, apex };
+}
+
 /**
  * The rise a throw needs to ARRIVE, against the ball's real air drag.
  *
@@ -130,8 +150,11 @@ function riseToArrive(y0, targetY, flat, horiz) {
     }
     return { arrived: false, y };
   };
-  let lo = 0, hi = 11;
-  if (fly(hi).arrived === false && fly(hi).y < targetY) return hi;
+  // Beyond about 45 degrees a throw gains height, not range, so that is the
+  // ceiling: when even this cannot reach the man, lobbing it higher only makes
+  // a mortar that hangs in the air and still falls short.
+  let lo = 0, hi = Math.min(11, Math.max(2.5, horiz));
+  if (!fly(hi).arrived) return hi;
   for (let i = 0; i < 20; i++) {
     const mid = (lo + hi) / 2;
     const r = fly(mid);
@@ -223,7 +246,12 @@ export function resolvePass(passer, target, opts) {
 
   // --- Flight shape ------------------------------------------------------
   let launchY, rise;
-  const targetY = wet ? 0.12 : lerp(0.55, 1.25, factors.elevation);
+  // Arrive at the RECEIVER's hands. This used to be derived from the PASSER's
+  // elevation, so a passer riding high threw a ball that had to arrive 1.25m up
+  // - and the arc needed to land that high is what made a direct pass look
+  // lobbed.
+  const targetY = wet ? 0.12
+    : clamp(receiver?.handPoint ? receiver.handPoint().y : 0.7, 0.45, 0.95);
   const flightTime = Math.max(0.12, (distance * distErr) / Math.max(4, speed));
   // Ballistic solve for the vertical component to arrive at targetY.
   rise = (targetY - from.y) / flightTime + 0.5 * 9.81 * flightTime;
@@ -274,21 +302,13 @@ export function resolvePass(passer, target, opts) {
   // speed, so the ball simply sails long past the target.
   if (type === PASS_TYPES.LOB) {
     const flatDist = distance * distErr;
-    // Solve from the APEX, not from a flight time. Scaling the arc off distance
-    // meant a short lob barely cleared the water (measured 0.48m), which is not
-    // a lob at all - the whole point is to clear a defender's raised arm, and
-    // that height is the same whether the receiver is three metres away or ten.
-    const apex = clamp(1.5 + flatDist * 0.10, 1.5, 3.0);
-    const rise0 = Math.max(0.25, apex - from.y);
-    // The ball carries real air drag, which a pure ballistic solve ignores:
-    // measured, a drag-free 1.37m arc only reached 0.77m in flight. Compensate
-    // so the lob clears what it is aimed to clear.
-    const DRAG_COMP = 1.45;
-    const vy = Math.sqrt(2 * 9.81 * rise0) * DRAG_COMP;
-    const fall = Math.sqrt(2 * Math.max(0.05, apex - targetY) / 9.81);
-    const lobTime = Math.max(0.45, vy / 9.81 + fall);
-    horiz = flatDist / lobTime;
-    launchY = vy;
+    // Solved from the apex rather than from a flight time: scaling the arc off
+    // distance meant a short lob barely cleared the water, and the whole point
+    // of a lob is to clear a defender's raised arm - the same height whether
+    // the receiver is three metres away or ten.
+    const lob = lobFlight(flatDist, from.y, targetY);
+    horiz = lob.horiz;
+    launchY = lob.vy;
   }
 
   const vel = { x: Math.sin(yaw) * horiz, y: launchY, z: Math.cos(yaw) * horiz };

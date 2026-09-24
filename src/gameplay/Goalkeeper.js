@@ -328,8 +328,14 @@ export function attemptSave(gk, ball, brain, rng, opts = {}) {
   // stopped on a second or third attempt. Removing it exposed the honest save
   // rate as too low, and shooting jumped from 63% to 71%. This puts the keeper
   // back where the shooting numbers were, on one legitimate attempt per shot.
+  // Recalibrated once goals were being judged at the LINE. The ball's goal test
+  // had its sign inverted, so a goal was given when the shot arrived in front of
+  // the goal - the keeper never really got to act, and this model was tuned
+  // against numbers it was not actually producing. With it properly in play it
+  // stopped 59% of everything (41% saved, 18% rebounds) and scoring fell to 1.6
+  // goals a team.
   const saveChance = clamp01(
-    lerp(0.70, 1.04, readiness) * lerp(0.85, 1.12, control) * lerp(1, 0.18, scrambling)
+    lerp(0.40, 0.72, readiness) * lerp(0.85, 1.12, control) * lerp(1, 0.18, scrambling)
   );
 
   const roll = rng.next();

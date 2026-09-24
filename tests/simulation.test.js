@@ -362,13 +362,17 @@ test('stamina degrades measurably across a match', () => {
   // Fatigue builds through a period and recovers at the breaks, so it is read
   // across the whole run: a snapshot at one fixed second can land just after an
   // interval, when it has legitimately recovered.
-  let peakFatigue = 0;
-  play(sim, 400, () => { for (const a of tracked) peakFatigue = Math.max(peakFatigue, a.matchFatigue); });
-  const stillIn = tracked.filter((a) => a.inPool && sim.active.home.includes(a));
-  if (stillIn.length) {
-    const dropped = stillIn.some((a, i) => a.freshness < before[tracked.indexOf(a)]);
-    assert.ok(dropped, 'at least one athlete is more tired than when they started');
-  }
+  let peakFatigue = 0, lowestFreshness = 1;
+  play(sim, 400, () => {
+    for (const a of tracked) {
+      peakFatigue = Math.max(peakFatigue, a.matchFatigue);
+      if (a.inPool) lowestFreshness = Math.min(lowestFreshness, a.freshness);
+    }
+  });
+  // Read freshness across play too: a fixed sampling second can land in an
+  // interval, where the squad has legitimately recovered.
+  assert.ok(lowestFreshness < Math.max(...before) - 0.02,
+    `athletes tire during play (lowest ${lowestFreshness.toFixed(2)} against ${Math.max(...before).toFixed(2)} at the start)`);
   assert.ok(peakFatigue > 0.1, `match fatigue accumulated during play (peak ${peakFatigue.toFixed(3)})`);
 });
 

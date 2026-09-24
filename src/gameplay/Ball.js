@@ -82,6 +82,7 @@ export class Ball {
     this.timeSinceLoose = 0;
     this.saveAttempted = false;   // one save attempt per shot, not one per frame
     this.breakaway = false;       // set by tryShot for an uncontested counter
+    this.breakawaySave = false;   // the keeper's one token chance on such a shot
     this.exitVelZ = 0;            // velocity along z at the moment it left play
     this.blockTriedBy = new Set();// one block attempt per defender per shot
     this.kind = kind;
@@ -222,8 +223,11 @@ export class Ball {
     // --- Goals -------------------------------------------------------------
     for (const sign of [-1, 1]) {
       const gz = sign * halfL;
-      const dz = (this.pos.z - gz) * sign; // negative = beyond the goal line
-      if (dz > 0.6 || dz < -1.6) continue;
+      // POSITIVE is beyond the goal line, negative is in front of it, in the
+      // field of play. The comment here used to claim the opposite and the two
+      // tests below were written to match the comment rather than the maths.
+      const dz = (this.pos.z - gz) * sign;
+      if (dz > 1.6 || dz < -0.8) continue;
 
       const halfGoal = f.goalWidth / 2;
       const crossbarY = f.goalHeight;
@@ -267,13 +271,22 @@ export class Ball {
         }
       }
 
-      // Goal line crossing.
-      if (dz < -r * 0.5 && Math.abs(this.pos.x) < halfGoal - r * 0.3 &&
+      // Goal line crossing - the ball is BEYOND the line, between the posts and
+      // under the bar.
+      //
+      // With the sign inverted, this fired for a ball in FRONT of the goal: any
+      // ball within 1.6m of the goal mouth and below bar height was treated as
+      // being in the net - snapped to 0.9m off the line and its velocity cut to
+      // a tenth. That is the goalkeeper who "cannot hold the ball": he threw an
+      // outlet at 10 m/s, it died at his hand, floated back to him, and he threw
+      // it again, over and over. It also meant a goal was given when the ball
+      // ARRIVED in front of the goal rather than when it crossed the line.
+      if (dz > 0 && Math.abs(this.pos.x) < halfGoal - r * 0.3 &&
           this.pos.y < crossbarY - r * 0.3 && this.pos.y > -1.2) {
         world.onGoal?.(this, sign);
         // Net: absorbs almost everything.
-        if (dz < -0.9) {
-          this.pos.z = gz - sign * 0.9;
+        if (dz > 0.9) {
+          this.pos.z = gz + sign * 0.9;
           this.vel.x *= 0.12; this.vel.y *= 0.1; this.vel.z *= -0.08;
           this.eventFlags.net = 1;
         }
@@ -282,7 +295,15 @@ export class Ball {
     }
 
     // --- Goal lines / end walls (ball out of play) -------------------------
-    if (this.pos.z < -halfL + r || this.pos.z > halfL - r) {
+    //
+    // The end wall stands ON the goal line, so it used to clamp the ball back
+    // into play a few centimetres BEFORE the line - meaning a ball could never
+    // cross it and a goal could never be detected there. Inside the goal mouth
+    // there is no wall: the ball carries on into the net.
+    const halfGoalMouth = f.goalWidth / 2 - r * 0.3;
+    const inGoalMouth = Math.abs(this.pos.x) < halfGoalMouth &&
+      this.pos.y < f.goalHeight - r * 0.3 && this.pos.y > -1.2;
+    if (!inGoalMouth && (this.pos.z < -halfL + r || this.pos.z > halfL - r)) {
       const sign = Math.sign(this.pos.z);
       // Remember which way the ball was actually travelling BEFORE the wall
       // bounce reverses it. The rules need to know whether the ball was leaving

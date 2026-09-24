@@ -18,7 +18,7 @@ import { Ball, BALL_STATE } from '../gameplay/Ball.js';
 import { ContactSystem, FOUL } from '../gameplay/Contact.js';
 import { GoalkeeperBrain, attemptSave, GK_PROFILE } from '../gameplay/Goalkeeper.js';
 import {
-  resolvePass, resolveCatch, resolveShot, goalAimPoint, pressureOn,
+  resolvePass, resolveCatch, resolveShot, goalAimPoint, pressureOn, lobFlight,
   contextualShotType, SHOT_TYPES, PASS_TYPES, shotQuality, laneOpenness,
 } from '../gameplay/Actions.js';
 import {
@@ -296,7 +296,11 @@ export class MatchSim {
     this._driveAthletes(dt, true);
     if (this.stateTimer <= 0) {
       if (this.profile.restarts.swimOffAtPeriodStart) {
-        this._setState(MATCH_STATE.SWIM_OFF, 4);
+        // Long enough for the race to be decided in the water. The sprint is
+        // the length of a half - twelve and a half metres - which takes over
+        // four seconds, so a 4s window handed the ball out just BEFORE anybody
+        // could reach it. It still ends the instant someone touches the ball.
+        this._setState(MATCH_STATE.SWIM_OFF, 9);
         this.clockRunning = true;
         this.presentation.whistle = 1;
         // Release the ball on the half-distance line. It is genuinely loose:
@@ -305,6 +309,18 @@ export class MatchSim {
         this.ball.state = BALL_STATE.FLIGHT;
         this.ball.timeSinceLoose = 0;
         this.ball.lastTouchSide = null;
+        // You are the one racing for it. The sprinter is the athlete in the
+        // middle, nearest the ball - in real water polo that is who goes - and
+        // watching an AI team-mate do it while you steer somebody else is not a
+        // swim-off. Player Career is the exception: there you are your athlete.
+        if (this.userControlsSide && !this.lockUserAthlete) {
+          const mine = this.activeAthletes(this.userControlsSide).filter((a) => !a.isGoalkeeper);
+          const sprinter = mine.sort((a, b) => Math.hypot(a.pos.x, a.pos.z) - Math.hypot(b.pos.x, b.pos.z))[0];
+          if (sprinter) {
+            this.setUserAthlete(sprinter);
+            this.manualSwitchCooldown = 5;   // control stays on him for the race
+          }
+        }
         this._timeline('Swim-off!');
         this._log('swimOff', { period: this.period });
       } else {
@@ -318,7 +334,13 @@ export class MatchSim {
   _releaseBallToNearest() {
     const all = this.allActive().filter((a) => !a.isGoalkeeper);
     if (!all.length) return;
-    const nearest = all.sort((a, b) => a.pos.lengthSq() - b.pos.lengthSq())[0];
+    // Nearest THE BALL, not nearest the centre of the pool. Sorting by distance
+    // from the origin handed the ball to whoever happened to line up closest to
+    // the middle - a player metres away from it - which is the ball flying to
+    // someone else while you were still swimming for it.
+    const b = this.ball.pos;
+    const nearest = all.sort((p, q) =>
+      Math.hypot(p.pos.x - b.x, p.pos.z - b.z) - Math.hypot(q.pos.x - b.x, q.pos.z - b.z))[0];
     this._giveBall(nearest);
     this._applyShotClock(shotClockAfter(this.profile, POSSESSION_EVENT.GAIN));
   }
@@ -998,6 +1020,10 @@ export class MatchSim {
       // player they were never thrown near. A raised arm in the path still wins
       // it: that is an obvious interception, and it should be.
       if (opponentOfPasser && !a.isGoalkeeper) window = 0.26 + a.armRaised * 0.14 + a.elevation * 0.08;
+      // The swim-off is a race to touch the ball, so you have to actually reach
+      // it. A metre-and-a-bit pickup radius meant the ball jumped to whoever got
+      // close first and you never got a hand to it.
+      if (this.state === MATCH_STATE.SWIM_OFF) window = Math.min(window, 0.45);
       if (d < window) {
         // Score by how comfortably they reach it, so the swimmer with margin wins.
         const score = (window - d) + swim * 0.25 + (isTarget ? 1.3 : 0);
@@ -1120,8 +1146,12 @@ export class MatchSim {
       if (Math.sign(this.ball.vel.z) !== Math.sign(gz - this.ball.pos.z)) continue;
       if (Math.abs(this.ball.pos.z - gz) > 2.6) continue;
 
-      // Breakaway: see tryShot. The keeper gets a token chance, not a real one.
-      if (this.ball.breakaway && !this.rng.chance(0.06)) continue;
+      // Breakaway: see tryShot. The keeper gets a token chance, not a real one -
+      // and it is ONE roll for the shot, decided when it was taken. Rolling it
+      // here meant rolling every frame the ball was near the goal, which over
+      // the ten or so frames of its flight came to a 46% chance of a save on a
+      // ball nobody should be stopping.
+      if (this.ball.breakaway && !this.ball.breakawaySave) continue;
 
       const manual = (this.userGkControl && this.userAthlete === gk) ? this.userCommand.saveAim : null;
       const res = attemptSave(gk, this.ball, brain, this.rng, { manualDirection: manual });
@@ -1638,10 +1668,14 @@ export class MatchSim {
     // lead was invisible.
     const aim = target.pos
       ? (() => {
-          const throwSpeed = lerp(8.5, 15, clamp01((passer.player.attr.passVelocity - 10) / 85))
-            * (type === PASS_TYPES.LOB ? 0.55 : 1);
-          const flight = Math.hypot(target.pos.x - passer.pos.x, target.pos.z - passer.pos.z) / throwSpeed;
-          const t = Math.min(flight, 1.1);
+          const d = Math.hypot(target.pos.x - passer.pos.x, target.pos.z - passer.pos.z);
+          // A lob hangs far longer than a flat pass, and guessing that as a flat
+          // fraction of the throw speed put the ball behind or short of a
+          // swimming team-mate. Ask the lob solver itself how long it will hang.
+          const flight = type === PASS_TYPES.LOB
+            ? lobFlight(d, passer.handPoint().y, 0.7).time
+            : d / lerp(8.5, 15, clamp01((passer.player.attr.passVelocity - 10) / 85));
+          const t = Math.min(flight, 1.6);
           return { x: target.pos.x + target.vel.x * t, z: target.pos.z + target.vel.z * t };
         })()
       : target;
@@ -1755,6 +1789,7 @@ export class MatchSim {
     this.ball.launch(res.from, res.vel, res.spin, 'shot', shooter);
 
     this.ball.breakaway = breakaway;
+    this.ball.breakawaySave = breakaway && this.rng.chance(0.06);
 
     this.lastShot = res;
     // Remember who shot, so a shot that goes in off a keeper's hand or a

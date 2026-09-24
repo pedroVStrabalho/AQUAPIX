@@ -398,3 +398,59 @@ test('a pass reaches the man: the receiver does not knock his own ball away', ()
   assert.ok(intoHands / thrown > 0.6,
     `most passes go straight into his hands (${(intoHands / thrown * 100).toFixed(1)}%)`);
 });
+
+test('a throw near a goal keeps its speed - the keeper can clear his own ball', () => {
+  // The ball's goal test had its sign inverted, so the "inside the net" branch
+  // fired for any ball IN FRONT of a goal, within 1.6m, between the posts and
+  // under the bar: the ball was snapped to 0.9m off the line and its velocity
+  // cut to a tenth. The keeper threw an outlet at 10 m/s, it died at his hand,
+  // floated back, and he threw it again - "the keeper gets and leaves the ball".
+  let launches = 0, killed = 0;
+  for (let m = 0; m < 4; m++) {
+    const { sim, frame } = match(31000 + m, ['kraken', 'solaris', 'atlas', 'obsidian'][m]);
+    let watch = null;
+    const orig = sim.ball.launch.bind(sim.ball);
+    sim.ball.launch = (from, vel, spin, kind, by) => {
+      const r = orig(from, vel, spin, kind, by);
+      watch = { v0: Math.hypot(vel.x, vel.z), frames: 0 };
+      return r;
+    };
+    playAsHuman(sim, frame, 60 * 5, () => {
+      if (!watch) return;
+      watch.frames++;
+      if (watch.frames < 1) return;
+      if (watch.v0 > 4) {
+        launches++;
+        if (Math.hypot(sim.ball.vel.x, sim.ball.vel.z) < watch.v0 * 0.5) killed++;
+      }
+      watch = null;
+    });
+  }
+  assert.ok(launches > 200, `throws measured (${launches})`);
+  assert.equal(killed, 0, `no throw loses most of its speed the instant it leaves the hand (${killed}/${launches})`);
+});
+
+test('the swim-off is a race you are in: you control the central sprinter', () => {
+  let races = 0, onSprinter = 0, touched = 0, grab = 0;
+  for (let m = 0; m < 6; m++) {
+    const { sim, frame } = match(41000 + m);
+    let watching = false;
+    for (let i = 0; i < 60 * 60 * 5 && !sim.finished; i++) {
+      frame();
+      if (sim.state === MATCH_STATE.SWIM_OFF && !watching) {
+        watching = true; races++;
+        const mine = sim.activeAthletes('home').filter((a) => !a.isGoalkeeper);
+        const central = mine.slice().sort((a, b) => Math.hypot(a.pos.x, a.pos.z) - Math.hypot(b.pos.x, b.pos.z))[0];
+        if (sim.userAthlete === central) onSprinter++;
+      } else if (watching && sim.ball.holder) {
+        const h = sim.ball.holder;
+        grab += Math.hypot(sim.ball.pos.x - h.pos.x, sim.ball.pos.z - h.pos.z);
+        touched++; watching = false;
+      }
+    }
+  }
+  assert.ok(races >= 6, `swim-offs happened (${races})`);
+  assert.equal(onSprinter, races, 'control is handed to the man in the middle, who races for the ball');
+  // Won by actually reaching it, not awarded to whoever lined up nearest the centre.
+  assert.ok(grab / touched < 1.2, `the winner is on the ball when he gets it (${(grab / touched).toFixed(2)}m)`);
+});
