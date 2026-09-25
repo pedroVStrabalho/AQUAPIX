@@ -20,6 +20,8 @@ export class MatchHUD {
     this.bannerTimer = 0;
     sim.bus.on('goal', ({ side, scorer }) => this._banner('GOAL!', scorer ? `#${scorer.player.capNumber} ${scorer.player.name}` : sim.teamOf(side).name, side));
     sim.bus.on('save', ({ gk }) => this._banner('SAVE!', `#${gk.player.capNumber} ${gk.player.name}`, gk.side, 1.2));
+    sim.bus.on('substitution', ({ side, out, in: incoming }) =>
+      this._toast(`${sim.teamOf(side).short} sub: #${incoming.player.capNumber} ${incoming.player.name} on for #${out.player.capNumber} ${out.player.name}`));
     sim.bus.on('foul', ({ explanation }) => { if (explanation) this._toast(`${explanation.headline}  ${explanation.offender}`); });
     sim.bus.on('timeline', ({ text }) => this._toast(text));
     this._toastTimer = 0;

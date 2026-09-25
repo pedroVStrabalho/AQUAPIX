@@ -70,6 +70,10 @@ export class Input2D {
         this.onUi({ type: 'timeout' });
         return;
       }
+      if (!e.repeat && e.code === 'KeyR' && this.enabled) {
+        this.onUi({ type: 'subs' });
+        return;
+      }
       const list = actionsFor(e.code);
       if (!list) return;
       if (e.code === 'Space' || e.code.startsWith('Arrow')) e.preventDefault();

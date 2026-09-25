@@ -91,6 +91,7 @@ export class MatchSim {
     this.rng = new Rng(this.seed);
     this.bus = new EventBus();
     this.record = [];             // deterministic match record (section 41)
+    this.cfgLineups = cfg.lineups ?? null;   // { home?: ids[7], away?: ids[7] }
     this.difficultyKey = cfg.difficulty ?? 'national';
     // Difficulty makes the OPPONENT better - their outfield AI and their keeper.
     // It used to be applied to both teams, so at Legendary your own team-mates
@@ -212,7 +213,16 @@ export class MatchSim {
       const squad = roster.map((p) => new Athlete(playAs(p), side, dir));
       this.squads[side] = squad;
 
-      const lineup = defaultLineup(roster);
+      // A career passes the seven the manager picked. It is used only if it is
+      // a real seven - seven athletes from this roster, exactly one goalkeeper -
+      // otherwise the automatic pick stands, so a stale save can never field
+      // six players or two keepers.
+      const chosen = this.cfgLineups?.[side];
+      const valid = Array.isArray(chosen) && chosen.length === 7 &&
+        new Set(chosen).size === 7 &&
+        chosen.every((id) => roster.some((p) => p.id === id)) &&
+        roster.filter((p) => chosen.includes(p.id) && p.position === 'GK').length === 1;
+      const lineup = valid ? roster.filter((p) => chosen.includes(p.id)) : defaultLineup(roster);
       const lineupIds = new Set(lineup.map((p) => p.id));
       this.active[side] = squad.filter((a) => lineupIds.has(a.player.id));
       this.bench[side] = squad.filter((a) => !lineupIds.has(a.player.id));
@@ -290,6 +300,7 @@ export class MatchSim {
     }
     this.transitionTimer = Math.max(0, this.transitionTimer - dt);
     this.stateTimer -= dt;
+    if (this.pendingSubs?.length && !this.isLive() && this.state !== MATCH_STATE.SHOOTOUT) this._flushPendingSubs();
 
     switch (this.state) {
       case MATCH_STATE.PRE_MATCH: break;
@@ -2030,6 +2041,33 @@ export class MatchSim {
     }
   }
 
+  /**
+   * A substitution the manager asked for. Made now if the rules allow it, or
+   * queued for the next stoppage if not (live play only allows flying swaps in
+   * your own re-entry corner, which is not somewhere you can steer from a menu).
+   */
+  userSubstitution(side, outId, inId) {
+    const out = this.active[side].find((a) => a.player.id === outId);
+    const incoming = this.bench[side].find((a) => a.player.id === inId);
+    if (!out || !incoming) return { ok: false, reason: 'unknown' };
+    if (out.isGoalkeeper !== incoming.isGoalkeeper) return { ok: false, reason: 'goalkeeperForGoalkeeper' };
+    if (incoming.excludedForMatch) return { ok: false, reason: 'excludedForMatch' };
+    const r = this.requestSubstitution(side, out, incoming, 'user');
+    if (r.ok) return { ok: true, when: 'now' };
+    this.pendingSubs = (this.pendingSubs ?? []).filter((q) => q.outId !== outId && q.inId !== inId);
+    this.pendingSubs.push({ side, outId, inId });
+    return { ok: true, when: 'nextStoppage' };
+  }
+
+  _flushPendingSubs() {
+    const queue = this.pendingSubs; this.pendingSubs = [];
+    for (const q of queue) {
+      const out = this.active[q.side].find((a) => a.player.id === q.outId);
+      const incoming = this.bench[q.side].find((a) => a.player.id === q.inId);
+      if (out && incoming) this.requestSubstitution(q.side, out, incoming, 'user');
+    }
+  }
+
   requestSubstitution(side, out, incoming, by = 'user') {
     const legal = substitutionLegal(this.profile, {
       state: this.state,
@@ -2037,7 +2075,12 @@ export class MatchSim {
       side,
       attackDir: this.attackDir[side],
       isGoalkeeper: incoming.isGoalkeeper,
-      activeCount: this.activeCount(side),
+      // The count once the outgoing player has LEFT, which is what the rule
+      // expects. Passing the count before he left meant every outfield
+      // substitution read as an eighth player - "squadFull" - so none ever
+      // happened: measured, 0 of 134 AI substitutions went through, and tired
+      // players never came off for either team in any mode.
+      activeCount: this.activeCount(side) - (out?.inPool ? 1 : 0),
     });
     if (!legal.legal) {
       this.bus.emit('substitutionRejected', { side, reason: legal.reason });

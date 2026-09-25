@@ -122,6 +122,7 @@ class Game {
       difficulty: this.matchConfig.difficulty, assist: this.matchConfig.assist,
       refereeProfile: 'standard', userSide: userIsHome ? 'home' : 'away',
       careerTactics: this.careerTactics, careerSide: userIsHome ? 'home' : 'away',
+      lineups: { [userIsHome ? 'home' : 'away']: this.career.startingSeven().map((p) => p.id) },
       returnTo: 'careerHub',
       onEnd: () => {
         this.career.completeRound({ home: this.sim.score.home, away: this.sim.score.away, simulated: false });
@@ -142,6 +143,7 @@ class Game {
         seed: Math.floor(Math.random() * 0xffffffff),
         difficulty: opts.difficulty, assist: opts.assist,
         refereeProfile: opts.refereeProfile, userSide: opts.userSide,
+        lineups: opts.lineups,
       });
 
       if (opts.careerTactics && opts.careerSide) {
@@ -180,7 +182,7 @@ class Game {
       this.sim.start();
       this._applyDrill();
       loading.remove();
-      this.screens.toast('WASD move · X / SPACE shoot · Z pass · C lob · defending: X steal, Z block, SPACE foul · Esc pause', 4200);
+      this.screens.toast('WASD move · X / SPACE shoot · Z pass · C lob · defending: X steal, Z block, SPACE foul · R subs · Esc pause', 4200);
     }, 40));
   }
 
@@ -350,6 +352,7 @@ class Game {
   _onUiAction(e) {
     const sim = this.sim; if (!sim) return;
     if (e.type === 'pause') this.togglePause();
+    else if (e.type === 'subs') this._openSubs();
     else if (e.type === 'timeout') { const r = sim.callTimeout(sim.userControlsSide); this.screens.toast(r.allowed ? 'Timeout.' : `Refused: ${humanise(r.reason)}`); }
   }
 
@@ -404,6 +407,66 @@ class Game {
       s.appendChild(row('Screen shake', [{ value: true, label: 'On' }, { value: false, label: 'Off' }],
         this.settings.cameraShake, (v) => { this.settings.cameraShake = v; this.applySettings(); }));
       panel.appendChild(s);
+    });
+  }
+
+  /**
+   * Substitutions: pick who comes off, then who comes on. Made at once if the
+   * rules allow it, otherwise at the next stoppage. In Player Career you are a
+   * player, not the coach, so the coach makes them.
+   */
+  _openSubs(pick = null, msg = null) {
+    const sim = this.sim;
+    const side = sim?.userControlsSide;
+    if (!side) return;
+    if (this.matchReturnTo === 'playerHub') { this.screens.toast('Your coach makes the substitutions.', 2200); return; }
+    const queued = new Set((sim.pendingSubs ?? []).filter((q) => q.side === side).flatMap((q) => [q.outId, q.inId]));
+    this._openOverlay((panel) => {
+      panel.appendChild(el('h2', null, 'Substitutions'));
+      panel.appendChild(el('div', 'sub', msg ?? (pick
+        ? 'Now pick who comes on.'
+        : 'Pick who comes off, then who comes on. Goalkeepers swap with goalkeepers.')));
+      const grid = el('div', 'subs-grid');
+      const col = (title, list, inPool) => {
+        const c = el('div', 'card subs-col');
+        c.appendChild(el('h3', null, title));
+        for (const a of list) {
+          const row = el('button', `subs-row ${pick === a.player.id ? 'on' : ''}`);
+          const fresh = Math.round((a.freshness ?? 1) * 100);
+          row.appendChild(el('span', 'subs-cap', `#${a.player.capNumber}`));
+          row.appendChild(el('span', 'subs-name', a.player.name));
+          row.appendChild(el('span', 'subs-pos', a.player.position));
+          const f = el('span', 'subs-fresh', `${fresh}%`);
+          f.style.color = fresh > 75 ? '#4ade80' : fresh > 50 ? '#fbbf24' : '#f87171';
+          row.appendChild(f);
+          const note = a.excludedForMatch ? 'OUT' : queued.has(a.player.id) ? 'QUEUED' : a.personalFouls ? `${a.personalFouls}F` : '';
+          row.appendChild(el('span', 'subs-note', note));
+          row.disabled = !!a.excludedForMatch;
+          row.addEventListener('click', () => {
+            if (inPool) { this._openSubs(a.player.id); return; }
+            if (!pick) { this._openSubs(null, 'Pick who comes off first.'); return; }
+            const outA = sim.active[side].find((x) => x.player.id === pick);
+            const r = sim.userSubstitution(side, pick, a.player.id);
+            if (!r.ok) {
+              const why = { goalkeeperForGoalkeeper: 'A goalkeeper can only swap with a goalkeeper.', excludedForMatch: 'He has fouled out.' }[r.reason] ?? 'That substitution is not possible.';
+              this._openSubs(pick, why); return;
+            }
+            this._openSubs(null, r.when === 'now'
+              ? `${a.player.name} on for ${outA?.player.name}.`
+              : `${a.player.name} comes on for ${outA?.player.name} at the next stoppage.`);
+          });
+          c.appendChild(row);
+        }
+        return c;
+      };
+      grid.appendChild(col('In the pool', sim.active[side], true));
+      grid.appendChild(col('Bench', sim.bench[side], false));
+      panel.appendChild(grid);
+      const actions = el('div', 'actions');
+      const done = el('button', 'btn', 'Back to the match');
+      done.addEventListener('click', () => this._closeOverlay());
+      actions.appendChild(done);
+      panel.appendChild(actions);
     });
   }
 

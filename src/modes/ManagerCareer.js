@@ -114,6 +114,52 @@ export class ManagerCareer {
   get club() { return TEAMS.find((t) => t.id === this.clubId); }
   get squad() { return this.league.rosters[this.clubId]; }
 
+  // ---------------------------------------------------------------------------
+  // The starting seven - YOUR choice.
+  //
+  // It used to be picked automatically by rating every match, with no way to
+  // change it, and the automatic pick did not even leave out injured players:
+  // the squad screen said "Injured 2w" while that athlete started. The seven is
+  // now chosen on the Squad screen and remembered. If an injury (or a sale)
+  // leaves a gap, the best available athlete fills it for that match, so you
+  // are never blocked from playing.
+  // ---------------------------------------------------------------------------
+  isAvailable(p) { return (this.state[p.id]?.injuryWeeks ?? 0) <= 0; }
+
+  /** The seven who will actually start: your picks, repaired if needed. */
+  startingSeven() {
+    const avail = this.squad.filter((p) => this.isAvailable(p));
+    const byOvr = (a, b) => b.overall - a.overall;
+    const picked = (this.lineup ?? []).map((id) => avail.find((p) => p.id === id)).filter(Boolean);
+    let gk = picked.find((p) => p.position === 'GK')
+      ?? avail.filter((p) => p.position === 'GK').sort(byOvr)[0];
+    const field = picked.filter((p) => p.position !== 'GK');
+    if (!this.lineup) field.push(...defaultLineup(avail).filter((p) => p && p.position !== 'GK'));
+    for (const p of avail.filter((q) => q.position !== 'GK').sort(byOvr)) {
+      if (field.length >= 6) break;
+      if (!field.includes(p)) field.push(p);
+    }
+    return [gk, ...field.slice(0, 6)].filter(Boolean);
+  }
+
+  /**
+   * Swap a starter and a substitute. Goalkeepers swap only with goalkeepers,
+   * so the seven always has exactly one. Returns { ok, reason }.
+   */
+  swapStarter(aId, bId) {
+    const seven = this.startingSeven();
+    const find = (id) => this.squad.find((p) => p.id === id);
+    const a = find(aId), b = find(bId);
+    if (!a || !b || a === b) return { ok: false, reason: 'unknown' };
+    const aIn = seven.includes(a), bIn = seven.includes(b);
+    if (aIn === bIn) return { ok: false, reason: 'sameGroup' };
+    const starter = aIn ? a : b, sub = aIn ? b : a;
+    if (!this.isAvailable(sub)) return { ok: false, reason: 'injured' };
+    if ((starter.position === 'GK') !== (sub.position === 'GK')) return { ok: false, reason: 'goalkeeperForGoalkeeper' };
+    this.lineup = seven.map((p) => (p === starter ? sub.id : p.id));
+    return { ok: true };
+  }
+
   expectationText() {
     return {
       win: 'the title', top3: 'a top-three finish',
@@ -253,7 +299,7 @@ export class ManagerCareer {
       if (this.wallet.streak >= 3) this.pushNews(`${this.wallet.streak} wins in a row - the city is buzzing.`);
 
       // Match load on the athletes who played.
-      for (const p of defaultLineup(this.squad)) {
+      for (const p of this.startingSeven()) {
         const s = this.state[p.id];
         s.condition = clamp01(s.condition - this.rng.range(0.08, 0.2));
         s.apps++;
@@ -565,6 +611,7 @@ export class ManagerCareer {
   serialise() {
     return {
       version: 1, season: this.season, round: this.round, clubId: this.clubId,
+      lineup: this.lineup ?? null,
       table: this.table, results: this.results, trainingFocus: this.trainingFocus,
       board: this.board, news: this.news, state: this.state,
       fixtures: this.fixtures,
@@ -592,6 +639,7 @@ export class ManagerCareer {
       squadMorale: data.squadMorale ?? 72, academyIntake: data.academyIntake ?? [],
       market: data.market ?? c.market, pendingDecisions: data.pendingDecisions ?? [],
       transferBudgetUsed: data.transferBudgetUsed ?? 0,
+      lineup: data.lineup ?? null,
     });
     // Older saves predate the progression wallet: start one from the club's
     // standing rather than refusing to load.
@@ -966,42 +1014,85 @@ registerScreen('careerHub', (game, params, mgr) => shell('Career', (body) => {
 
 registerScreen('careerSquad', (game, params, mgr) => shell('Squad', (body) => {
   const c = game.career;
-  const table = el('table', 'data');
+  const seven = c.startingSeven();
+  const inSeven = new Set(seven.map((p) => p.id));
+  const pick = params.pick ?? null;
+  const pickedPlayer = pick ? c.squad.find((p) => p.id === pick) : null;
+
+  // How to change the seven: click a player, then the one he swaps with.
+  const help = el('div', 'card squad-help');
+  help.appendChild(el('h3', null, 'Starting seven'));
+  const msg = params.msg
+    ?? (pickedPlayer
+      ? `${pickedPlayer.name} selected - now click the player he ${inSeven.has(pickedPlayer.id) ? 'makes way for' : 'replaces'}.`
+      : 'Click a player, then click who he swaps with. Goalkeepers swap with goalkeepers; injured players cannot start.');
+  help.appendChild(el('div', 'squad-msg', msg));
+  body.appendChild(help);
+
+  const table = el('table', 'data squad-table');
   const thead = el('thead');
   const hr = el('tr');
-  for (const h of ['Cap', 'Name', 'Pos', 'Age', 'OVR', 'Stars', 'POT', 'Cond', 'Form', 'Apps', 'Status']) {
+  for (const h of ['', 'Cap', 'Name', 'Pos', 'Age', 'OVR', 'Stars', 'POT', 'Cond', 'Form', 'Apps']) {
     hr.appendChild(el('th', ['OVR', 'Age', 'Apps'].includes(h) ? 'num' : null, h));
   }
   thead.appendChild(hr);
   table.appendChild(thead);
   const tb = el('tbody');
-  const seven = new Set(defaultLineup(c.squad).map((p) => p.id));
-  for (const p of [...c.squad].sort((a, b) => a.capNumber - b.capNumber)) {
-    const s = c.state[p.id];
-    const tr = el('tr');
-    if (seven.has(p.id)) tr.className = 'row-hi';
-    tr.appendChild(el('td', 'num', String(p.capNumber)));
-    tr.appendChild(el('td', null, p.name));
-    tr.appendChild(el('td', null, p.position));
-    tr.appendChild(el('td', 'num', String(p.age)));
-    tr.appendChild(el('td', 'num', String(p.overall)));
-    const st = el('td', null, starString(p.overall)); st.style.color = '#f4c430'; tr.appendChild(st);
-    const pot = el('td', null, `${p.pot10 ?? '-'}/10`); pot.style.color = (p.pot10 ?? 0) >= 8 ? '#5ef08a' : (p.pot10 ?? 0) >= 6 ? '#8be9fd' : 'var(--muted)'; tr.appendChild(pot);
-    const cond = el('td', 'num', `${Math.round(s.condition * 100)}%`);
-    cond.style.color = s.condition > 0.8 ? '#4ade80' : s.condition > 0.55 ? '#fbbf24' : '#f87171';
-    tr.appendChild(cond);
-    tr.appendChild(el('td', 'num', `${Math.round(s.form * 100)}%`));
-    tr.appendChild(el('td', 'num', String(s.apps)));
-    tr.appendChild(el('td', null, s.injuryWeeks > 0 ? `Injured ${s.injuryWeeks}w` : seven.has(p.id) ? 'Starting seven' : 'Available'));
-    tb.appendChild(tr);
-  }
+
+  const click = (p) => {
+    if (!pick) { mgr.show('careerSquad', { pick: p.id }); return; }
+    if (pick === p.id) { mgr.show('careerSquad', {}); return; }
+    const r = c.swapStarter(pick, p.id);
+    if (r.ok) { game.saveCareer(); mgr.show('careerSquad', { msg: 'Starting seven updated.' }); return; }
+    if (r.reason === 'sameGroup') { mgr.show('careerSquad', { pick: p.id }); return; }
+    const why = { injured: 'That player is injured and cannot start.', goalkeeperForGoalkeeper: 'A goalkeeper can only swap with a goalkeeper.' }[r.reason] ?? 'That swap is not possible.';
+    mgr.show('careerSquad', { pick, msg: why });
+  };
+
+  const group = (title, list) => {
+    const gr = el('tr', 'squad-group');
+    const gc = el('td', null, title); gc.colSpan = 11; gr.appendChild(gc);
+    tb.appendChild(gr);
+    for (const p of list) {
+      const s = c.state[p.id];
+      const tr = el('tr', `squad-row ${inSeven.has(p.id) ? 'row-hi' : ''} ${pick === p.id ? 'row-pick' : ''}`);
+      tr.tabIndex = 0;
+      tr.addEventListener('click', () => click(p));
+      tr.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); click(p); } });
+      const status = s.injuryWeeks > 0 ? `INJ ${s.injuryWeeks}w` : inSeven.has(p.id) ? 'START' : '';
+      const stc = el('td', 'squad-status', status);
+      if (s.injuryWeeks > 0) stc.style.color = '#f87171';
+      tr.appendChild(stc);
+      tr.appendChild(el('td', 'num', String(p.capNumber)));
+      tr.appendChild(el('td', null, p.name));
+      tr.appendChild(el('td', null, p.position));
+      tr.appendChild(el('td', 'num', String(p.age)));
+      tr.appendChild(el('td', 'num', String(p.overall)));
+      const st = el('td', null, starString(p.overall)); st.style.color = '#f4c430'; tr.appendChild(st);
+      const pot = el('td', null, `${p.pot10 ?? '-'}/10`); pot.style.color = (p.pot10 ?? 0) >= 8 ? '#5ef08a' : (p.pot10 ?? 0) >= 6 ? '#8be9fd' : 'var(--muted)'; tr.appendChild(pot);
+      const cond = el('td', 'num', `${Math.round(s.condition * 100)}%`);
+      cond.style.color = s.condition > 0.8 ? '#4ade80' : s.condition > 0.55 ? '#fbbf24' : '#f87171';
+      tr.appendChild(cond);
+      tr.appendChild(el('td', 'num', `${Math.round(s.form * 100)}%`));
+      tr.appendChild(el('td', 'num', String(s.apps)));
+      tb.appendChild(tr);
+    }
+  };
+  const posOrder = { GK: 0, CD: 1, CF: 2, PT: 3, DR: 4, WG: 5, UT: 6 };
+  const byPos = (a, b) => (posOrder[a.position] ?? 9) - (posOrder[b.position] ?? 9) || b.overall - a.overall;
+  group('Starting seven', [...seven].sort(byPos));
+  group('Bench', c.squad.filter((p) => !inSeven.has(p.id)).sort(byPos));
   table.appendChild(tb);
   const card = el('div', 'card');
-  card.appendChild(el('h3', null, 'Squad'));
   card.appendChild(table);
   body.appendChild(card);
 
   const a = el('div', 'actions');
+  if (pick) {
+    const cancel = el('button', 'btn ghost', 'Cancel selection');
+    cancel.addEventListener('click', () => mgr.show('careerSquad', {}));
+    a.appendChild(cancel);
+  }
   const back = el('button', 'btn ghost', 'Back');
   back.addEventListener('click', () => mgr.show('careerHub'));
   a.appendChild(back);

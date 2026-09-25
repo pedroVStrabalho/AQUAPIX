@@ -363,6 +363,7 @@ const SCREENS = {
     const cmds = [
       ['Esc / P', 'Pause - resume, statistics, quick settings, abandon'],
       ['T', 'Call a timeout (your possession, two a match)'],
+      ['R', 'Substitutions - made at once, or at the next stoppage'],
       ['G', 'Take or release manual goalkeeper control'],
     ];
     for (const [k, d] of cmds) {
