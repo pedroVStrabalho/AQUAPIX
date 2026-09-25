@@ -126,7 +126,7 @@ export const WORLD_AQUATICS_2026 = makeProfile({
  */
 export const ARCADE = makeProfile({
   id: 'arcade',
-  name: 'Arcade (5 min match)',
+  name: 'Short - 4 x 1 min',
   governingBody: 'AQUAPIX',
   effectiveDate: '2026-01-01',
   timing: {
@@ -142,7 +142,25 @@ export const ARCADE = makeProfile({
   },
 });
 
-/** Shorter periods for pick-up matches. Every other rule is identical. */
+/**
+ * The same Arcade rules - snappy restarts, short breaks - at longer lengths.
+ * Nobody plays a 32-minute match on a browser game, so the longest match on
+ * offer is four periods of two and a half minutes: ten minutes of game clock.
+ */
+function arcadeOfLength(id, name, periodSeconds) {
+  return makeProfile({
+    ...structuredClone(ARCADE), id, name,
+    timing: { ...structuredClone(ARCADE.timing), periodSeconds },
+  });
+}
+export const ARCADE_MEDIUM = arcadeOfLength('arcade-8', 'Medium - 4 x 2 min', 120);
+export const ARCADE_FULL = arcadeOfLength('arcade-10', 'Full - 4 x 2.5 min', 150);
+
+/**
+ * Longer and federation-style profiles. Kept as rules fixtures - the rules
+ * engine is tested against them - but not offered in the menu: the owner set
+ * ten minutes as the longest match anyone should be asked to play.
+ */
 export const QUICK_MATCH_6MIN = makeProfile({
   id: 'quick-6',
   name: 'Quick Match (6 min periods)',
@@ -179,8 +197,13 @@ export const YOUTH_U16 = makeProfile({
   review: { videoReview: false, coachChallenges: 0 },
 });
 
+/** What the Quick Match screen offers, shortest first. Longest: 10 minutes. */
+export const PLAYABLE_PROFILES = [ARCADE, ARCADE_MEDIUM, ARCADE_FULL];
+
 export const PROFILES = {
   [ARCADE.id]: ARCADE,
+  [ARCADE_MEDIUM.id]: ARCADE_MEDIUM,
+  [ARCADE_FULL.id]: ARCADE_FULL,
   [WORLD_AQUATICS_2026.id]: WORLD_AQUATICS_2026,
   [QUICK_MATCH_6MIN.id]: QUICK_MATCH_6MIN,
   [QUICK_MATCH_4MIN.id]: QUICK_MATCH_4MIN,

@@ -8,7 +8,7 @@
  */
 
 import { TEAMS } from '../data/Teams.js';
-import { PROFILES, getProfile } from '../rules/RuleProfiles.js';
+import { PROFILES, PLAYABLE_PROFILES, getProfile } from '../rules/RuleProfiles.js';
 import { DIFFICULTY } from '../ai/TeamAI.js';
 import { ASSIST_PROFILE } from '../core/MatchSim.js';
 import { headlineRows, STAT_COLORS, starString, teamLevel } from '../data/DisplayStats.js';
@@ -252,8 +252,10 @@ const SCREENS = {
     options.style.marginTop = '22px';
     options.appendChild(el('h3', null, 'Match Options'));
 
-    options.appendChild(field('Rules profile', chipRow(
-      Object.values(PROFILES).map((p) => ({ value: p.id, label: p.name })),
+    // A saved choice of a profile that is no longer offered falls back to Short.
+    if (!PLAYABLE_PROFILES.some((p) => p.id === cfg.profileId)) cfg.profileId = 'arcade';
+    options.appendChild(field('Match length', chipRow(
+      PLAYABLE_PROFILES.map((p) => ({ value: p.id, label: p.name })),
       cfg.profileId, (v) => { cfg.profileId = v; mgr.show('matchSetup'); })));
 
     options.appendChild(field('Difficulty', chipRow(
