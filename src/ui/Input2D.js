@@ -272,7 +272,7 @@ export class Input2D {
     const wantsPass = this.hit('action2');
     const wantsLob = this.hit('lob');
     if ((wantsPass || wantsLob) && a.charging !== 'shot') {
-      const target = this._pickReceiver(a, cmd.dir);
+      const target = this._pickReceiver(a, cmd.dir, false, wantsLob ? 3.5 : 0);
       if (target) {
         const type = wantsLob ? PASS_TYPES.LOB
           : this.isDown('modifier') ? PASS_TYPES.DRIVEN : PASS_TYPES.DRY;
@@ -331,7 +331,7 @@ export class Input2D {
   }
 
   /** Choose a teammate to pass to, favouring the pushed direction. */
-  _pickReceiver(passer, dir, longOnly = false) {
+  _pickReceiver(passer, dir, longOnly = false, minDist = 0) {
     const sim = this.sim;
     const mates = sim.activeAthletes(passer.side).filter((m) => m !== passer);
     if (!mates.length) return null;
@@ -342,17 +342,24 @@ export class Input2D {
     // pointing at. Anyone outside a 90 degree cone around the push is simply not
     // a candidate - unless nobody is in the cone at all, in which case we fall
     // back to the old open scoring rather than refusing to pass.
-    for (const pass of aiming ? ['cone', 'any'] : ['any']) {
+    // Rounds, strictest first: in the pushed cone and far enough; in the cone;
+    // anyone far enough; anyone. `minDist` is for the lob - a lob to a man at
+    // arm's length is caught on the way up, before it has risen at all.
+    const rounds = [];
+    if (aiming) rounds.push({ cone: true, far: true }, { cone: true, far: false });
+    rounds.push({ cone: false, far: true }, { cone: false, far: false });
+    for (const round of rounds) {
       let best = null, bestScore = -1e9;
       for (const m of mates) {
         const dx = m.pos.x - passer.pos.x;
         const dz = m.pos.z - passer.pos.z;
         const d = Math.hypot(dx, dz) || 1;
         if (longOnly && d < 6) continue;
+        if (round.far && d < minDist) continue;
         let score = 0;
         if (aiming) {
           const align = (dx / d) * dir.x + (dz / d) * dir.z;
-          if (pass === 'cone' && align < 0.35) continue;
+          if (round.cone && align < 0.35) continue;
           score += align * 6.0;
         }
         // Among the team-mates you are pointing at, the open one. The pick used

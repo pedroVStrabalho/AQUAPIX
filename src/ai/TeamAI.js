@@ -28,6 +28,20 @@ import { pressureOn, laneOpenness, shotQuality, SHOT_TYPES, PASS_TYPES, contextu
 const a01 = (v) => clamp01((v - 10) / 85);
 
 /**
+ * Hold a station with hysteresis. Off-ball swimmers used to set off whenever
+ * their target was more than 20-25cm away - and targets, which move with the
+ * ball, drift that much all the time - so every player in the pool crept,
+ * stopped and crept again: measured, a start or a stop every three seconds per
+ * athlete, which reads as a restless, chaotic pool. Once a player has reached
+ * his spot he treads water there until it has really moved.
+ */
+function holdStation(p, d, settleAt, resumeAt) {
+  if (p._atStation) { if (d > resumeAt) p._atStation = false; }
+  else if (d < settleAt) p._atStation = true;
+  return !p._atStation;
+}
+
+/**
  * `edge` is added to every attribute of the side you face, for that match only
  * and on a copy - the league's real players never change. It is what actually
  * separates the levels: AI v AI, the decision knobs alone left Amateur and
@@ -280,13 +294,20 @@ export class TeamAI {
     const mine = sim.activeAthletes(this.side);
     const opp = sim.activeAthletes(this.side === 'home' ? 'away' : 'home');
     const attacking = sim.possession === this.side;
+    // How long this team has had the ball, for the carrier's shot patience.
+    this._possT = attacking ? (this._possT ?? 0) + dt : 0;
 
     // Swim-off: exactly ONE athlete (the fastest) sprints for the centre ball.
     // Everyone else takes up their attacking formation, so the pool does not
     // collapse into a scrum at the half line.
     if (sim.state === 'swimOff') {
       const field = mine.filter((p) => p.inPool && !p.isGoalkeeper);
-      if (!this._sprinter || !field.includes(this._sprinter)) {
+      // On your side the sprinter is the athlete YOU are steering - otherwise an
+      // AI team-mate raced for the same ball beside you.
+      const yours = sim.userControlsSide === this.side && sim.userAthlete && field.includes(sim.userAthlete)
+        ? sim.userAthlete : null;
+      if (yours) this._sprinter = yours;
+      else if (!this._sprinter || !field.includes(this._sprinter)) {
         this._sprinter = field.slice().sort((a, b) => b.player.attr.swimSpeed - a.player.attr.swimSpeed)[0];
       }
       const system = OFFENSIVE_SYSTEMS[this.tactics.offense];
@@ -581,7 +602,7 @@ export class TeamAI {
     const d = Math.hypot(dxs, dzs);
     const lateralBias = 1 + clamp01(d / 6) * 1.8;
     const to = new Vec2(dxs * lateralBias, dzs);
-    cmd.dir = d > 0.25 ? to.normalize() : null;
+    cmd.dir = holdStation(p, d, 0.45, 1.3) ? to.normalize() : null;
     cmd.arriveDist = d;
     // Get to the spread set quickly after a turnover - crowding is the enemy.
     cmd.effort = Math.max(cmd.effort, clamp01(d / 1.5) * lerp(0.8, 1.0, this.plan.tempo));
@@ -633,6 +654,16 @@ export class TeamAI {
 
     const own = shotValueFor(p);
     const sq = own.q;
+
+    // How long THIS athlete has had the ball. A carrier who passes the instant
+    // he catches it makes the whole match ping-pong: measured, the AI moved the
+    // ball every 1.5 seconds, a possession lasted a median 6.6 seconds against
+    // 15-28 in the real sport, and nearly half its attacks were lost without a
+    // shot. A player catches, looks, and then plays - quicker under pressure or
+    // at a high tempo, slower when he has time.
+    if (this._carrierRef !== p) { this._carrierRef = p; this._carrierHeld = 0; }
+    this._carrierHeld += dt;
+    const lookTime = lerp(2.2, 1.1, this.plan.tempo) * lerp(1.0, 0.4, pressure);
 
     // Shooting: quality is raised to a power so a poor shot scores very little and
     // driving/passing win instead - the carrier only commits to a shot it can
@@ -729,7 +760,13 @@ export class TeamAI {
       const shotOpt = options.find((o) => o.kind === 'shoot');
       if (shotOpt) choice = shotOpt;
     }
-    const willShoot = choice.kind === 'shoot' && (choice.quality > 0.14 || desperate || putBack);
+    // Work for a good shot early, accept a lesser one as the attack matures. A
+    // flat bar of 0.14 took the first half-chance every time, which is why
+    // attacks lasted seconds instead of building. A put-back, a dying clock and
+    // a genuinely good look still go straight away.
+    const matured = clamp01((this._possT ?? 0) / 14);
+    const shotBar = lerp(0.40, 0.14, matured) * lerp(1.12, 0.88, this.plan.riskTolerance);
+    const willShoot = choice.kind === 'shoot' && (choice.quality > shotBar || desperate || putBack);
 
     if (mayAct && !p.actionLock && settled) {
       if (willShoot) {
@@ -743,7 +780,8 @@ export class TeamAI {
           sim.tryShot(p, choice.aim, type, clamp01(0.55 + this.plan.riskTolerance * 0.4 + this.rng.gauss(0, this.diff.error)));
           this.memory.noteShot(p, p.pos, p.pumpFakes > 0);
         }
-      } else if (choice.kind === 'pass' && choice.lane > 0.58) {
+      } else if (choice.kind === 'pass' && choice.lane > 0.58 &&
+                 (this._carrierHeld >= lookTime || clockPanic > 0.25)) {
         sim.tryPass(p, choice.target, choice.type, clamp01(0.5 + dist2(p.pos, choice.target.pos) / 22));
         if (choice.type === PASS_TYPES.ENTRY) this.memory.noteCentreEntry(p.pos.x);
       }
@@ -751,7 +789,7 @@ export class TeamAI {
 
     // If the carrier wanted to shoot but the shot was not on, treat the movement
     // as a drive so it works to a better position instead of loitering.
-    if (choice.kind === 'shoot' && !willShoot && choice.quality < 0.14) choice.kind = 'drive';
+    if (choice.kind === 'shoot' && !willShoot) choice.kind = 'drive';
 
     // --- Movement ----------------------------------------------------------
     if (choice.kind === 'drive') {
@@ -926,7 +964,10 @@ export class TeamAI {
 
     const to = new Vec2(target.x - p.pos.x, target.z - p.pos.z);
     const d = to.length();
-    cmd.dir = d > 0.2 ? to.normalize() : null;
+    // The man on the ball tracks it tightly; everyone else holds their spot
+    // until it has genuinely moved.
+    const onBall = !!carrier && Math.hypot(carrier.pos.x - p.pos.x, carrier.pos.z - p.pos.z) < 3;
+    cmd.dir = (onBall ? d > 0.2 : holdStation(p, d, 0.35, 0.9)) ? to.normalize() : null;
     cmd.arriveDist = d;
     cmd.effort = clamp01(d / 2.6) * lerp(0.5, 1.0, this.plan.pressLevel);
     // A defender who has arrived at their marking spot would otherwise sit at

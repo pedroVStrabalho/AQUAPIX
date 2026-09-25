@@ -2204,8 +2204,30 @@ export class MatchSim {
     for (const a of list) if (dTo(a) < dTo(nearest)) nearest = a;
     const cur = this.userAthlete && list.includes(this.userAthlete) ? this.userAthlete : null;
     if (!cur) { this.setUserAthlete(nearest); this.autoSwitchCooldown = AUTO_SWITCH_HOLD; return; }
+
+    // Switch when the BALL CARRIER changes, not whenever another defender drifts
+    // marginally nearer. Continuous "nearest to the ball" switching moved your
+    // control every time the attack shifted - measured, a quarter of all switches,
+    // and one switch every three seconds overall - which is what made defending
+    // feel chaotic: you never kept the same man long enough to do anything.
+    const carrier = ball.holder && ball.holder.side !== side ? ball.holder : null;
+    if (carrier && carrier !== this._lastOppCarrier) {
+      this._lastOppCarrier = carrier;
+      const toCarrier = (a) => Math.hypot(a.pos.x - carrier.pos.x, a.pos.z - carrier.pos.z);
+      let best = list[0];
+      for (const a of list) if (toCarrier(a) < toCarrier(best)) best = a;
+      // ...and only if you are not already in the play. If your man is within a
+      // few metres of the new carrier you keep him - hopping to whichever
+      // defender is a metre closer on every catch was as jarring as before.
+      if (best !== cur && toCarrier(cur) > 4 && toCarrier(best) < toCarrier(cur) - 1.5) {
+        this.setUserAthlete(best);
+        this.autoSwitchCooldown = AUTO_SWITCH_HOLD;
+      }
+      return;
+    }
+    // Otherwise only rescue you when you are genuinely out of the play.
     if (this.autoSwitchCooldown > 0) return;
-    if (nearest !== cur && dTo(nearest) < dTo(cur) - AUTO_SWITCH_MARGIN) {
+    if (nearest !== cur && dTo(cur) > 8 && dTo(nearest) < dTo(cur) - AUTO_SWITCH_MARGIN * 2) {
       this.setUserAthlete(nearest);
       this.autoSwitchCooldown = AUTO_SWITCH_HOLD;
     }

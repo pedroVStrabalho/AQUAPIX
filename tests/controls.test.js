@@ -151,10 +151,13 @@ test('Z raises the arm when defending', () => {
   sim.setUserAthlete(me);
   for (let i = 0; i < 5; i++) frame();
 
+  // Losing the ball hands you the defender nearest the new carrier, so check
+  // whoever you are actually steering rather than the athlete you started on.
   fire('keydown', 'KeyZ');
   for (let i = 0; i < 5; i++) frame();
   assert.ok(input.isDown('action2'), 'Z is registering');
-  assert.ok(me.blockTimer > 0, 'holding Z raises the arm to block');
+  assert.ok(sim.userAthlete.blockTimer > 0, 'holding Z raises the arm to block');
+  assert.ok(me, 'athlete present');
   fire('keyup', 'KeyZ');
 });
 
