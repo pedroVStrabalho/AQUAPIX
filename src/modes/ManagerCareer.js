@@ -35,6 +35,19 @@ export const TRAINING_FOCUS = {
   recovery: { name: 'Recovery Week', attrs: [], fatigue: 0.25 },
 };
 
+/**
+ * What a player is worth. Steep on purpose: roughly doubling every six points
+ * of overall, so 70 is about $13k, 80 about $44k and 90 about $140k. Youth with
+ * potential costs more, veterans less.
+ */
+export function marketValue(p) {
+  const base = 4000 * 2 ** ((p.overall - 60) / 5.8);
+  const age = p.age <= 22 ? 1 + 0.35 * ((p.pot10 ?? 5) / 10) : p.age >= 30 ? 0.7 : 1;
+  return Math.max(500, Math.round(base * age / 100) * 100);
+}
+/** A sale fetches the value less the buying club's margin. */
+export function saleValue(p) { return Math.round(marketValue(p) * 0.8 / 100) * 100; }
+
 export class ManagerCareer {
   /**
    * @param {object} league  the generated league
@@ -390,7 +403,7 @@ export class ManagerCareer {
     if (i < 0) return { ok: false, reason: 'notAvailable' };
     const p = this.freeAgents[i];
     if (p.askingPrice > this.board.budget) return { ok: false, reason: 'insufficientBudget' };
-    if (this.squad.length >= 16) return { ok: false, reason: 'squadFull' };
+    if (this.squad.length >= 18) return { ok: false, reason: 'squadFull' };
 
     this.board.budget -= p.askingPrice;
     this.freeAgents.splice(i, 1);
@@ -528,10 +541,74 @@ export class ManagerCareer {
     for (let i = 0; i < n; i++) this.academyIntake.push(this._makeProspect(i, { academy: true }));
   }
 
+  /**
+   * The transfer market: players worth buying, at prices that make you choose.
+   *
+   * Every target used to be drawn around an attribute of 48, so the whole list
+   * was 50-56 overall at about $5,000 - nobody on it would get into any team in
+   * the league, and the price was nothing against a $150k budget. Now each
+   * season brings two stars, four established players, three young prospects
+   * and three cheap squad players, priced on a steep curve: a 90 costs about
+   * what a whole budget holds, so one star or two good players is a real call.
+   */
   _buildMarket() {
-    const pool = [];
-    for (let i = 0; i < 12; i++) pool.push(this._makeProspect(i, { academy: false }));
-    return pool.sort((a, b) => b.overall - a.overall);
+    const tiers = [
+      ...Array(2).fill({ lo: 82, hi: 90, age: [24, 30], pot: [5, 8] }),
+      ...Array(4).fill({ lo: 74, hi: 82, age: [23, 31], pot: [4, 7] }),
+      ...Array(3).fill({ lo: 62, hi: 72, age: [18, 21], pot: [7, 10] }),
+      ...Array(3).fill({ lo: 62, hi: 70, age: [27, 33], pot: [2, 5] }),
+    ];
+    return tiers.map((t, i) => this._makeMarketPlayer(i, t)).sort((a, b) => b.overall - a.overall);
+  }
+
+  _makeMarketPlayer(idx, tier) {
+    const rng = this.rng.fork(0x3a7 + idx * 211 + this.season * 1013 + (this.round ?? 0) * 7);
+    const position = rng.pick(POSITIONS);
+    const attr = {};
+    for (const a of Object.keys(this.squad[0]?.attr ?? {})) attr[a] = Math.round(clamp(rng.gauss(62, 8), 25, 95));
+    const weights = OVERALL_WEIGHTS[position] ?? OVERALL_WEIGHTS.UT;
+    for (const k of Object.keys(weights)) attr[k] = Math.round(clamp(attr[k] + rng.range(3, 10), 25, 97));
+    const p = {
+      id: `mk_${this.season}_${this.round ?? 0}_${idx}`,
+      teamId: null, firstName: rng.pick(FIRST_NAMES), lastName: rng.pick(LAST_NAMES),
+      position, secondaryPosition: null, leftHanded: rng.chance(0.15),
+      height: rng.int(180, 202), age: rng.int(tier.age[0], tier.age[1]), attr, traits: [],
+      form: 1, morale: 0.7, condition: 1,
+    };
+    // Walk the attributes to the tier's overall.
+    const target = rng.int(tier.lo, tier.hi);
+    for (let k = 0; k < 6; k++) {
+      const d = target - overallFor(p);
+      if (Math.abs(d) < 0.6) break;
+      for (const a of Object.keys(attr)) attr[a] = clamp(Math.round(attr[a] + d), 20, 99);
+    }
+    p.name = `${p.firstName} ${p.lastName}`;
+    p.overall = overallFor(p);
+    p.pot10 = rng.int(tier.pot[0], tier.pot[1]);
+    p.potential = Math.round(clamp(52 + p.pot10 * 4.3 + (30 - p.age) * 0.4, p.overall, 99));
+    p.wage = Math.round((p.overall ** 2.1) / 60) * 10;
+    p.askingPrice = marketValue(p);
+    this.state[p.id] = { condition: 1, matchFatigue: 0, injuryWeeks: 0, form: 1, apps: 0, goals: 0, assists: 0, exclusions: 0, saves: 0 };
+    return p;
+  }
+
+  /**
+   * Sell a player for his market value (less the buyer's margin). Raises money
+   * and makes room; the squad keeps at least eleven players and one keeper.
+   */
+  sellPlayer(playerId) {
+    const p = this.squad.find((q) => q.id === playerId);
+    if (!p) return { ok: false, reason: 'unknown' };
+    if (this.squad.length <= 11) return { ok: false, reason: 'squadTooSmall' };
+    if (p.position === 'GK' && this.squad.filter((q) => q.position === 'GK').length <= 1) {
+      return { ok: false, reason: 'lastGoalkeeper' };
+    }
+    const fee = saleValue(p);
+    this.squad.splice(this.squad.indexOf(p), 1);
+    if (this.lineup) this.lineup = this.lineup.filter((id) => id !== p.id);
+    this.board.budget += fee;
+    this.pushNews(`Sold ${p.name} (${p.overall} OVR) for $${fee.toLocaleString()}.`);
+    return { ok: true, fee };
   }
 
   signProspect(id, from) {
@@ -648,6 +725,11 @@ export class ManagerCareer {
     c.sacked = data.sacked ?? false;
     c._bindWalletMoney();
     if (data.rosters) league.rosters = data.rosters;
+    // A save from before the market was rebuilt carries the old list of 50-56
+    // overall players; give that career the real market straight away.
+    if (!Array.isArray(c.market) || !c.market.length || Math.max(...c.market.map((p) => p.overall ?? 0)) < 62) {
+      c.market = c._buildMarket();
+    }
     return c;
   }
 }
@@ -1265,34 +1347,80 @@ registerScreen('careerTransfers', (game, params, mgr) => shell('Transfers', (bod
 // --- Player Market -----------------------------------------------------------
 registerScreen('careerMarket', (game, params, mgr) => shell('Player Market', (body) => {
   const c = game.career;
-  body.appendChild(el('p', null, `Transfer budget: $${c.board.budget}. Sign players for a fee (potential shown 1-10). Free agents cost only wages.`));
+  const money = (n) => `$${Math.round(n).toLocaleString()}`;
+  const head = el('div', 'card market-head');
+  head.appendChild(el('h3', null, `Budget ${money(c.board.budget)}`));
+  head.appendChild(el('p', null,
+    'Stars cost most of a budget; prospects are cheap but raw. The wage bill rises with the size and quality of your squad, so every signing costs money every week too. Sell to raise funds or make room.'));
+  if (params.msg) head.appendChild(el('div', 'squad-msg', params.msg));
+  body.appendChild(head);
 
-  const section = (title, list, from) => {
+  const table = (cols) => {
+    const t = el('table', 'data'); const thead = el('thead'); const hr = el('tr');
+    for (const h of cols) hr.appendChild(el('th', ['OVR', 'Age', 'Fee', 'Value'].includes(h) ? 'num' : null, h));
+    thead.appendChild(hr); t.appendChild(thead); return t;
+  };
+  const cells = (tr, p) => {
+    tr.appendChild(el('td', null, p.name));
+    tr.appendChild(el('td', null, p.position));
+    tr.appendChild(el('td', 'num', String(p.age)));
+    tr.appendChild(el('td', 'num', String(p.overall)));
+    const st = el('td', null, starString(p.overall)); st.style.color = '#f4c430'; tr.appendChild(st);
+    const pot = el('td', null, `${p.pot10 ?? '-'}/10`);
+    pot.style.color = (p.pot10 ?? 0) >= 8 ? '#5ef08a' : (p.pot10 ?? 0) >= 6 ? '#8be9fd' : 'var(--muted)';
+    tr.appendChild(pot);
+  };
+
+  const buySection = (title, list, from) => {
+    if (!list.length) return;
     const card = el('div', 'card'); card.style.marginTop = '14px';
     card.appendChild(el('h3', null, title));
-    const table = el('table', 'data'); const thead = el('thead'); const hr = el('tr');
-    for (const h of ['Name', 'Pos', 'Age', 'OVR', 'Stars', 'POT', 'Fee', '']) hr.appendChild(el('th', h === 'OVR' ? 'num' : null, h));
-    thead.appendChild(hr); table.appendChild(thead);
+    const t = table(['Name', 'Pos', 'Age', 'OVR', 'Stars', 'POT', 'Fee', '']);
     const tb = el('tbody');
     for (const p of list) {
-      const tr = el('tr');
-      tr.appendChild(el('td', null, p.name));
-      tr.appendChild(el('td', null, p.position));
-      tr.appendChild(el('td', 'num', String(p.age)));
-      tr.appendChild(el('td', 'num', String(p.overall)));
-      const st = el('td', null, starString(p.overall)); st.style.color = '#f4c430'; tr.appendChild(st);
-      const pot = el('td', null, `${p.pot10}/10`); pot.style.color = p.pot10 >= 8 ? '#5ef08a' : p.pot10 >= 6 ? '#8be9fd' : 'var(--muted)'; tr.appendChild(pot);
-      tr.appendChild(el('td', 'num', from === 'free' ? 'Free' : `$${p.askingPrice}`));
+      const tr = el('tr'); cells(tr, p);
+      const fee = from === 'free' ? 0 : p.askingPrice;
+      tr.appendChild(el('td', 'num', fee ? money(fee) : 'Free'));
       const td = el('td'); const b = el('button', 'chip', 'Sign');
-      b.disabled = (from !== 'free' && p.askingPrice > c.board.budget) || c.squad.length >= 18;
-      b.addEventListener('click', () => { const r = c.signProspect(p.id, from); if (!r.ok) mgr.toast(humanise(r.reason)); else { game.saveCareer(); mgr.show('careerMarket'); } });
+      const tooDear = fee > c.board.budget, full = c.squad.length >= 18;
+      b.disabled = tooDear || full;
+      b.title = tooDear ? 'Not enough budget' : full ? 'Squad full - sell someone first' : '';
+      b.addEventListener('click', () => {
+        const r = c.signProspect(p.id, from);
+        if (!r.ok) { mgr.show('careerMarket', { msg: humanise(r.reason) }); return; }
+        game.saveCareer();
+        mgr.show('careerMarket', { msg: `Signed ${p.name}${fee ? ` for ${money(fee)}` : ' on a free'}.` });
+      });
       td.appendChild(b); tr.appendChild(td);
       tb.appendChild(tr);
     }
-    table.appendChild(tb); card.appendChild(table); body.appendChild(card);
+    t.appendChild(tb); card.appendChild(t); body.appendChild(card);
   };
-  section('Transfer targets', c.market ?? [], 'market');
-  if (c.freeAgents?.length) section('Free agents', c.freeAgents, 'free');
+  buySection('Transfer targets', c.market ?? [], 'market');
+  buySection('Free agents', c.freeAgents ?? [], 'free');
+
+  // Your squad - sell. Two clicks, because a sale cannot be undone.
+  const card = el('div', 'card'); card.style.marginTop = '14px';
+  card.appendChild(el('h3', null, `Your squad - sell (${c.squad.length} players)`));
+  const t = table(['Name', 'Pos', 'Age', 'OVR', 'Stars', 'POT', 'Value', '']);
+  const tb = el('tbody');
+  for (const p of [...c.squad].sort((a, b) => b.overall - a.overall)) {
+    const tr = el('tr'); cells(tr, p);
+    tr.appendChild(el('td', 'num', money(saleValue(p))));
+    const td = el('td');
+    const confirming = params.confirmSell === p.id;
+    const b = el('button', `chip ${confirming ? 'on' : ''}`, confirming ? 'Confirm sale' : 'Sell');
+    b.addEventListener('click', () => {
+      if (!confirming) { mgr.show('careerMarket', { confirmSell: p.id, msg: `Sell ${p.name} for ${money(saleValue(p))}? Click Confirm sale.` }); return; }
+      const r = c.sellPlayer(p.id);
+      if (!r.ok) { mgr.show('careerMarket', { msg: { squadTooSmall: 'You need at least eleven players.', lastGoalkeeper: 'You cannot sell your only goalkeeper.' }[r.reason] ?? humanise(r.reason) }); return; }
+      game.saveCareer();
+      mgr.show('careerMarket', { msg: `Sold ${p.name} for ${money(r.fee)}.` });
+    });
+    td.appendChild(b); tr.appendChild(td);
+    tb.appendChild(tr);
+  }
+  t.appendChild(tb); card.appendChild(t); body.appendChild(card);
 
   const a = el('div', 'actions'); const back = el('button', 'btn ghost', 'Back'); back.addEventListener('click', () => mgr.show('careerHub'));
   a.appendChild(back); body.appendChild(a);

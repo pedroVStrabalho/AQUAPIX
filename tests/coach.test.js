@@ -8,7 +8,8 @@ const { generateLeague } = await import('../src/data/Teams.js');
 const { getProfile } = await import('../src/rules/RuleProfiles.js');
 const { MatchSim, ASSIST_PROFILE } = await import('../src/core/MatchSim.js');
 const { MATCH_STATE } = await import('../src/rules/RulesEngine.js');
-const { ManagerCareer } = await import('../src/modes/ManagerCareer.js');
+const await_mc = await import('../src/modes/ManagerCareer.js');
+const { ManagerCareer } = await_mc;
 
 const mk = (league, opts = {}) => new MatchSim({
   profile: getProfile(opts.profile ?? 'arcade'), league, homeId: 'tidal', awayId: 'kraken',
@@ -84,4 +85,36 @@ test('your substitution is made at once, or at the next stoppage', () => {
   const gk = sim.active.home.find((a) => a.isGoalkeeper);
   const field = sim.bench.home.find((a) => !a.isGoalkeeper);
   assert.equal(sim.userSubstitution('home', gk.player.id, field.player.id).reason, 'goalkeeperForGoalkeeper');
+});
+
+test('the transfer market has players worth buying, at prices that force a choice', () => {
+  // Every target used to be 50-56 overall at ~$5,000: nobody on it would make
+  // any team in the league, and it cost nothing against a $150k budget.
+  const { ManagerCareer: MC, marketValue } = await_mc;
+  const c = new MC(generateLeague(), 'zephyr');
+  const ovr = c.market.map((p) => p.overall);
+  const weakestStarter = Math.min(...c.startingSeven().map((p) => p.overall));
+  assert.ok(Math.max(...ovr) > weakestStarter, `the best target (${Math.max(...ovr)}) would start for the weakest club (worst starter ${weakestStarter})`);
+  assert.ok(ovr.filter((o) => o >= 80).length >= 2, 'there are stars');
+  assert.ok(c.market.some((p) => p.age <= 21 && p.pot10 >= 8), 'and young prospects with real potential');
+  const star = c.market[0];
+  assert.ok(star.askingPrice > c.board.budget * 0.45, `a star costs a big share of the budget ($${star.askingPrice} of $${c.board.budget})`);
+  assert.ok(marketValue({ overall: 90, age: 26 }) > marketValue({ overall: 80, age: 26 }) * 2.5, 'the price curve is steep');
+});
+
+test('you can sell for a fee, but never below eleven players or your last keeper', () => {
+  const { ManagerCareer: MC } = await_mc;
+  const c = new MC(generateLeague(), 'tidal');
+  const before = c.board.budget;
+  const p = [...c.squad].sort((a, b) => a.overall - b.overall).find((q) => q.position !== 'GK');
+  const r = c.sellPlayer(p.id);
+  assert.ok(r.ok && r.fee > 0 && c.board.budget === before + r.fee, 'a sale raises money');
+  assert.ok(!c.squad.includes(p));
+  while (c.squad.length > 11) {
+    const q = c.squad.find((x) => x.position !== 'GK');
+    c.sellPlayer(q.id);
+  }
+  const lastField = c.squad.find((x) => x.position !== 'GK');
+  assert.equal(c.sellPlayer(lastField.id).reason, 'squadTooSmall');
+  assert.equal(c.startingSeven().length, 7, 'the seven repairs itself after sales');
 });
