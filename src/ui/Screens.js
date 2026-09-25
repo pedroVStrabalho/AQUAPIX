@@ -25,6 +25,18 @@ const el = (tag, cls, text) => {
 
 const frag = () => document.createDocumentFragment();
 
+/** A club colour lifted until it reads as text on the dark UI. */
+export function readableOnDark(hex) {
+  const m = /^#?([0-9a-f]{6})$/i.exec(hex ?? '');
+  if (!m) return '#cfe8f5';
+  let [r, g, b] = [0, 2, 4].map((i) => parseInt(m[1].slice(i, i + 2), 16));
+  const lum = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
+  if (lum >= 0.5) return hex;
+  const k = (0.5 - lum) / (1 - lum) + 0.1;
+  [r, g, b] = [r, g, b].map((v) => Math.round(v + (255 - v) * Math.min(1, k)));
+  return `rgb(${r}, ${g}, ${b})`;
+}
+
 export class ScreenManager {
   constructor(root, game) {
     this.root = root;
@@ -170,11 +182,13 @@ const SCREENS = {
 
     // Tools and reference. Present, but not competing with the game itself.
     const util = el('div', 'util-row');
+    // "Implementation Status" was a developer report - a completion checklist
+    // against the design bible - sitting in the main menu of a game. It is no
+    // longer linked from here.
     const items = [
       ['Teams and Rosters', 'rosters'],
       ['Controls', 'controls'],
       ['Settings', 'settings'],
-      ['Implementation Status', 'status'],
     ];
     items.forEach(([label, screen], i) => {
       if (i) util.appendChild(el('span', 'util-sep', '\u00b7'));
@@ -531,7 +545,7 @@ const SCREENS = {
 
     if (p.traits?.length) {
       const tr = el('p', null, p.traits.map((t) => TRAIT_BY_ID[t]?.name).filter(Boolean).join(' · '));
-      tr.style.color = team.colors.primary;
+      tr.style.color = readableOnDark(team.colors.primary);
       tr.style.marginTop = '10px';
       head.appendChild(tr);
     }

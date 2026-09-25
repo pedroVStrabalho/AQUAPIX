@@ -1367,7 +1367,12 @@ export class MatchSim {
         scorer.stats.shots++;
         this.stats[side].shots++;
       }
-      if (this.transitionTimer > 0) { scorer.stats.counterGoals++; this.stats[side].counterGoals++; }
+      // A counter goal is one scored within nine seconds of winning the ball,
+      // before the defence could set. This used the 3.2s AI transition cue,
+      // which expires long before a counter swum from your own half arrives,
+      // so the stat read zero almost every match.
+      const cb = this.counterBreak;
+      if (cb && cb.side === side && this.clockNow - cb.at < 9) { scorer.stats.counterGoals++; this.stats[side].counterGoals++; }
       if (this._pendingAssist && this.clockNow - this._pendingAssist.at < 4 && this._pendingAssist.from.side === side) {
         this._pendingAssist.from.stats.assists++;
         this.stats[side].assists++;

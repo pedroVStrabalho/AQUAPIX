@@ -933,3 +933,13 @@ body {
 .subs-pos { color: #7dd3fc; font-size: 11px; }
 .subs-fresh { text-align: right; font-family: var(--mono); }
 .subs-note { font-family: var(--font-display); font-size: 9px; color: #fbbf24; text-align: right; }
+
+/* ---- Attack direction ---------------------------------------------------- */
+.mh-attack {
+  position: absolute; right: 0; top: 50%; transform: translateY(-50%);
+  writing-mode: vertical-rl; padding: 10px 4px;
+  font-family: var(--font-display); font-size: 9px; letter-spacing: 0.18em;
+  color: #fff; background: var(--tc, #0ea5e9); opacity: 0.85;
+  border: 2px solid rgba(255, 255, 255, 0.35); border-right: 0;
+  pointer-events: none;
+}

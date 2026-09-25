@@ -16,7 +16,7 @@ import { Rng, clamp, clamp01, lerp } from '../core/Math2.js';
 import { TEAMS, defaultLineup, distanceKm } from '../data/Teams.js';
 import { overallFor, POSITION_NAMES, TRAIT_BY_ID, OVERALL_WEIGHTS, POSITIONS } from '../data/Attributes.js';
 import { starRating, starString } from '../data/DisplayStats.js';
-import { registerScreen, shell, menuItem, chipRow, field, el } from '../ui/Screens.js';
+import { registerScreen, shell, menuItem, chipRow, field, el, readableOnDark } from '../ui/Screens.js';
 import { simulateByStars } from './SimResult.js';
 import { OFFENSIVE_SYSTEMS, DEFENSIVE_SYSTEMS, EXTRA_PLAYER_SYSTEMS, MAN_DOWN_SYSTEMS, TACTICAL_TRIGGERS } from '../ai/Tactics.js';
 import { humanise } from '../ui/HUD.js';
@@ -467,7 +467,7 @@ export class ManagerCareer {
     // New academy intake and a refreshed transfer market.
     this._genAcademy();
     this.market = this._buildMarket();
-    this.pushNews(`Season ${this.season} begins. Budget: ${this.board.budget}. ${this.academyIntake.length} academy prospects await your decision.`);
+    this.pushNews(`Season ${this.season} begins. Budget: $${Math.round(this.board.budget).toLocaleString()}. ${this.academyIntake.length} academy prospects await your decision.`);
   }
 
 
@@ -815,7 +815,7 @@ registerScreen('careerSetup', (game, params, mgr) => shell('Coach Career', (body
     card.appendChild(el('div', 'tc-bio', t.bio));
     const exp = el('div', 'mi-desc');
     exp.textContent = `Board expects: ${t.prestige >= 85 ? 'the title' : t.prestige >= 80 ? 'top three' : t.prestige >= 77 ? 'top five' : 'progress'}`;
-    exp.style.color = t.colors.primary;
+    exp.style.color = readableOnDark(t.colors.primary);
     card.appendChild(exp);
     card.addEventListener('click', () => {
       // Starting a new career destroys the saved one. Ask first - a saved career
@@ -844,7 +844,7 @@ registerScreen('careerHub', (game, params, mgr) => shell('Career', (body) => {
   head.style.borderLeft = `4px solid ${club.colors.primary}`;
   head.appendChild(el('div', 'tc-name', club.name));
   head.appendChild(el('div', 'tc-city',
-    `Season ${c.season} · Round ${Math.min(c.round + 1, c.fixtures.length)} of ${c.fixtures.length} · Budget ${c.board.budget}`));
+    `Season ${c.season} · Round ${Math.min(c.round + 1, c.fixtures.length)} of ${c.fixtures.length}`));
   const conf = el('div', 'pcb');
   conf.style.marginTop = '12px';
   conf.style.gridTemplateColumns = '140px 1fr';
@@ -861,7 +861,6 @@ registerScreen('careerHub', (game, params, mgr) => shell('Career', (body) => {
   const addI = (label, val, color) => { const d = el('div', 'tc-stat'); const b = el('b', null, val); if (color) b.style.color = color; d.appendChild(b); d.appendChild(document.createTextNode(label)); teamInfo.appendChild(d); };
   addI('TEAM STARS', c.teamStarAvg ? c.teamStarAvg().toFixed(1) + '\u2605' : '-', '#f4c430');
   addI('SQUAD MORALE', Math.round(c.squadMorale ?? 72), (c.squadMorale ?? 72) > 55 ? '#5ef08a' : '#ffcf4d');
-  addI('TRANSFER BUDGET', '$' + (c.board.budget));
   head.appendChild(teamInfo);
 
   // ---- Progression: level, XP, supporters, money -------------------------
@@ -877,7 +876,9 @@ registerScreen('careerHub', (game, params, mgr) => shell('Career', (body) => {
     addP('LEVEL', String(w.level), '#8ad7ff');
     addP('XP', `${w.xpIntoLevel}/${w.xpForNext}`, '#8ad7ff');
     addP('FANS', w.fans.toLocaleString(), '#f4c430');
-    addP('MONEY', '$' + w.money.toLocaleString(), '#5ef08a');
+    // The one money figure. It is the transfer budget too: the same $151,200
+    // used to appear three times, only one of them with thousands separators.
+    addP('BUDGET', '$' + Math.round(w.money).toLocaleString(), '#5ef08a');
     if (w.streak > 0) addP('WIN STREAK', String(w.streak), '#ff9f4d');
     head.appendChild(prog);
 
@@ -1304,7 +1305,7 @@ registerScreen('careerTable', (game, params, mgr) => shell('League', (body) => {
 registerScreen('careerTransfers', (game, params, mgr) => shell('Transfers', (body) => {
   const c = game.career;
   const card = el('div', 'card');
-  card.appendChild(el('h3', null, `Free agents · budget ${c.board.budget}`));
+  card.appendChild(el('h3', null, `Free agents · budget $${Math.round(c.board.budget).toLocaleString()}`));
   const table = el('table', 'data');
   const thead = el('thead');
   const hr = el('tr');

@@ -55,6 +55,14 @@ export class MatchHUD {
     this.shotClock = el('div', 'mh-shotclock', '28');
     this.node.appendChild(this.shotClock);
 
+    // Which way you are attacking. The view is turned so your side always
+    // attacks to the RIGHT, but nothing on screen said so.
+    if (sim.userControlsSide) {
+      this.attack = el('div', 'mh-attack', 'ATTACK \u25B6');
+      this.attack.style.setProperty('--tc', sim.teamOf(sim.userControlsSide).colors.primary);
+      this.node.appendChild(this.attack);
+    }
+
     // Exclusions.
     this.excl = el('div', 'mh-excl');
     this.node.appendChild(this.excl);
