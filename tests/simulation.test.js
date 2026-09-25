@@ -465,24 +465,38 @@ test('a timeout is granted to the team in possession and refused to the other', 
   assert.equal(sim.state, MATCH_STATE.TIMEOUT);
 });
 
-test('difficulty changes AI behaviour without inflating athlete attributes', () => {
-  const amateur = makeMatch({ seed: 4004, difficulty: 'amateur' });
-  const legendary = makeMatch({ seed: 4004, difficulty: 'legendary' });
+test('difficulty makes the OPPONENT better, never your side, and never the league', () => {
+  // Section 19.2 said difficulty must not touch attributes. Measured, the AI
+  // decision knobs alone did not change results at all - Amateur and Legendary
+  // won 8 and 10 of 16 against National - so at the owner's request difficulty
+  // now also lifts or lowers the attributes of the side you play against, for
+  // that match only, on a copy.
+  const mk = (difficulty) => makeMatch({ seed: 4004, difficulty, userSide: 'home' });
+  const amateur = mk('amateur');
+  const legendary = mk('legendary');
 
-  // The published ratings must be identical: difficulty may not touch them
-  // (section 19.2).
   for (let i = 0; i < 14; i++) {
-    assert.equal(
-      amateur.squads.away[i].player.attr.shotPower,
-      legendary.squads.away[i].player.attr.shotPower,
-      'attributes are untouched by difficulty'
-    );
-    assert.equal(amateur.squads.away[i].maxSpeed, legendary.squads.away[i].maxSpeed);
+    // The side you face plays to the level you picked...
+    assert.ok(legendary.squads.away[i].player.attr.shotPower > amateur.squads.away[i].player.attr.shotPower,
+      'a legendary opponent plays better than an amateur one');
+    // ...your own side is always its real self...
+    assert.equal(amateur.squads.home[i].player.attr.shotPower, legendary.squads.home[i].player.attr.shotPower,
+      'your team is untouched by difficulty');
   }
-  // What does change is recognition, reaction and error.
+  // ...and the league's real players are never modified.
+  const real = league.rosters[legendary.awayTeam.id][0];
+  assert.equal(real.attr.shotPower, league.rosters[amateur.awayTeam.id][0].attr.shotPower);
+  assert.notEqual(legendary.squads.away[0].player, real, 'the opponent plays on a copy, not the league record');
+  assert.equal(legendary.squads.away[0].player.id, real.id, 'with the same identity, so careers still map');
+
+  // Discipline is deliberately excluded: weaker sides must not foul more.
+  assert.equal(amateur.squads.away[0].player.attr.foulDiscipline, legendary.squads.away[0].player.attr.foulDiscipline);
+
+  // The decision knobs still scale as before, for the opponent.
   assert.ok(legendary.ai.away.diff.react < amateur.ai.away.diff.react);
   assert.ok(legendary.ai.away.diff.recognition > amateur.ai.away.diff.recognition);
-  assert.ok(legendary.ai.away.diff.error < amateur.ai.away.diff.error);
+  // Your team-mates play at a fixed, competent level whatever you pick.
+  assert.equal(amateur.ai.home.difficultyKey, legendary.ai.home.difficultyKey);
 });
 
 test('the simulation is stable at low and high frame rates alike', () => {

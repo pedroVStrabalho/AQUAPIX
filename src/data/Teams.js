@@ -215,13 +215,47 @@ export function generateLeague(seed = 20260727) {
     const quality = lerp(66, 73.5, (team.prestige - 75) / 13);
     const squad = [];
     for (let cap = 1; cap <= 14; cap++) {
-      squad.push(makePlayer(rng.fork(cap * 7919 + team.id.length * 31), team.id, cap, quality));
+      // Salted by the club's whole id. It used to be salted by the id's LENGTH,
+      // so clubs whose ids are the same length - kraken, aurora and zephyr are
+      // all six letters - drew each cap number from the very same random stream:
+      // the same name, the same traits, near-identical ratings, in three
+      // different clubs. 39 of the 112 players in the league shared their full
+      // name with someone else.
+      squad.push(makePlayer(rng.fork(cap * 7919 + hashId(team.id)), team.id, cap, quality));
     }
     // Rank starters so cap 2-7 really are the best available at their positions.
     squad.sort((a, b) => a.capNumber - b.capNumber);
     rosters[team.id] = squad;
   }
+  uniqueNames(rosters, rng.fork(0x4e41));
   return { seed, teams: TEAMS.map((t) => ({ ...t })), rosters };
+}
+
+function hashId(str) {
+  let h = 2166136261;
+  for (let i = 0; i < str.length; i++) h = Math.imul(h ^ str.charCodeAt(i), 16777619);
+  return (h >>> 0) % 1000003;
+}
+
+/**
+ * No two players in the league share a full name, and no club fields the same
+ * surname more than twice. Forty first names by forty surnames is plenty of
+ * room; this only ever re-draws the few genuine collisions.
+ */
+function uniqueNames(rosters, rng) {
+  const used = new Set();
+  for (const team of TEAMS) {
+    const surnames = {};
+    for (const p of rosters[team.id]) {
+      let tries = 0;
+      while ((used.has(`${p.firstName} ${p.lastName}`) || (surnames[p.lastName] ?? 0) >= 2) && tries++ < 60) {
+        if (tries % 2) p.lastName = rng.pick(LAST); else p.firstName = rng.pick(FIRST);
+      }
+      p.name = `${p.firstName} ${p.lastName}`;
+      used.add(p.name);
+      surnames[p.lastName] = (surnames[p.lastName] ?? 0) + 1;
+    }
+  }
 }
 
 /** Default seven: one goalkeeper plus the six strongest field players by role fit. */

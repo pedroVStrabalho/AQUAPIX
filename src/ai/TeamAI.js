@@ -10,9 +10,12 @@
  *   6 Execution           - force, timing and target for the chosen action
  *   7 Learning            - opponent tendencies feed back into layer 4
  *
- * Difficulty never inflates attributes beyond their published ratings
- * (section 19.2). It changes reaction time, recognition, error frequency,
- * adaptation and risk assessment only.
+ * Difficulty changes reaction time, recognition, error frequency, adaptation
+ * and risk - and, for the side you play against, how well its athletes play
+ * (see `edge` below). The design bible's section 19.2 said difficulty must
+ * never touch attributes; measured, the knobs alone did not change results at
+ * all, so that rule was set aside at the owner's request that the difficulty
+ * "makes the other team and keeper better".
  */
 
 import { Vec2, clamp, clamp01, lerp, dist2, angleDelta, smoothstep } from '../core/Math2.js';
@@ -25,8 +28,13 @@ import { pressureOn, laneOpenness, shotQuality, SHOT_TYPES, PASS_TYPES, contextu
 const a01 = (v) => clamp01((v - 10) / 85);
 
 /**
- * Difficulty never inflates attributes - it changes how quickly the AI reads
- * play and how tightly it presses.
+ * `edge` is added to every attribute of the side you face, for that match only
+ * and on a copy - the league's real players never change. It is what actually
+ * separates the levels: AI v AI, the decision knobs alone left Amateur and
+ * Legendary winning 8 and 10 of 16 against National, with shots, passing,
+ * turnovers and steals all flat. Your own team always plays at its real level.
+ *
+ * The rest changes how quickly the AI reads play and how tightly it presses.
  *
  * `press` is how close the defence lives to the ball carrier: an amateur side
  * gives you room to swim and think, a legendary one is on your shoulder. It
@@ -37,11 +45,11 @@ const a01 = (v) => clamp01((v - 10) / 85);
  * board: the player needs a beat to see what is happening and act on it.
  */
 export const DIFFICULTY = {
-  amateur:      { react: 0.66, recognition: 0.42, error: 0.34, adapt: 0.15, risk: 0.35, gkDiscipline: 0.35, subQuality: 0.35, press: 0.30, label: 'Amateur' },
-  club:         { react: 0.52, recognition: 0.58, error: 0.24, adapt: 0.30, risk: 0.45, gkDiscipline: 0.52, subQuality: 0.55, press: 0.48, label: 'Club' },
-  national:     { react: 0.40, recognition: 0.74, error: 0.16, adapt: 0.50, risk: 0.55, gkDiscipline: 0.70, subQuality: 0.72, press: 0.64, label: 'National' },
-  international:{ react: 0.30, recognition: 0.87, error: 0.10, adapt: 0.72, risk: 0.66, gkDiscipline: 0.85, subQuality: 0.88, press: 0.82, label: 'International' },
-  legendary:    { react: 0.22, recognition: 0.96, error: 0.06, adapt: 0.9,  risk: 0.74, gkDiscipline: 0.94, subQuality: 0.95, press: 0.97, label: 'Legendary' },
+  amateur:      { edge: -16, react: 0.66, recognition: 0.42, error: 0.34, adapt: 0.15, risk: 0.35, gkDiscipline: 0.35, subQuality: 0.35, press: 0.30, label: 'Amateur' },
+  club:         { edge: -8,  react: 0.52, recognition: 0.58, error: 0.24, adapt: 0.30, risk: 0.45, gkDiscipline: 0.52, subQuality: 0.55, press: 0.48, label: 'Club' },
+  national:     { edge: 0,   react: 0.40, recognition: 0.74, error: 0.16, adapt: 0.50, risk: 0.55, gkDiscipline: 0.70, subQuality: 0.72, press: 0.64, label: 'National' },
+  international:{ edge: 7,   react: 0.30, recognition: 0.87, error: 0.10, adapt: 0.72, risk: 0.66, gkDiscipline: 0.85, subQuality: 0.88, press: 0.82, label: 'International' },
+  legendary:    { edge: 14,  react: 0.22, recognition: 0.96, error: 0.06, adapt: 0.9,  risk: 0.74, gkDiscipline: 0.94, subQuality: 0.95, press: 0.97, label: 'Legendary' },
 };
 
 /** Layer 7: opponent tendency memory. Gradual and explainable, never psychic. */

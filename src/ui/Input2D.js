@@ -56,6 +56,20 @@ export class Input2D {
       return a == null ? null : (Array.isArray(a) ? a : [a]);
     };
     this._kd = (e) => {
+      // Match commands. Caught here, at the raw key, rather than in update():
+      // input is switched off while paused, so a pause key handled there could
+      // pause the game but never resume it. These were listed on the Controls
+      // screen and in the match hint, but nothing ever called them - there was
+      // no way to pause a match at all.
+      if (!e.repeat && (e.code === 'Escape' || e.code === 'KeyP')) {
+        e.preventDefault?.();
+        this.onUi({ type: 'pause' });
+        return;
+      }
+      if (!e.repeat && e.code === 'KeyT' && this.enabled) {
+        this.onUi({ type: 'timeout' });
+        return;
+      }
       const list = actionsFor(e.code);
       if (!list) return;
       if (e.code === 'Space' || e.code.startsWith('Arrow')) e.preventDefault();

@@ -228,3 +228,20 @@ test('a direct pass (Z) is flat, and only the lob (C) arcs', () => {
   assert.ok(d < 2.0, `a direct pass stays flat (peaks ${d.toFixed(2)}m)`);
   assert.ok(l > d * 1.8, `the lob is clearly a lob next to it (${l.toFixed(2)}m vs ${d.toFixed(2)}m)`);
 });
+
+test('Esc pauses the match and Esc resumes it; T calls a timeout', () => {
+  // The pause menu existed but no key ever opened it: there was no way to pause.
+  const { sim, input } = withBall(71);
+  const events = [];
+  input.onUi = (e) => { events.push(e.type); if (e.type === 'pause') input.enabled = !input.enabled; };
+  fire('keydown', 'Escape'); fire('keyup', 'Escape');
+  assert.deepEqual(events, ['pause'], 'Esc asks to pause');
+  assert.equal(input.enabled, false, 'and the game is paused');
+  // While paused, input processing is off - the pause key must still work.
+  fire('keydown', 'Escape'); fire('keyup', 'Escape');
+  assert.deepEqual(events, ['pause', 'pause'], 'Esc again asks to resume');
+  assert.equal(input.enabled, true, 'and play resumes');
+  fire('keydown', 'KeyT'); fire('keyup', 'KeyT');
+  assert.equal(events.at(-1), 'timeout', 'T asks for a timeout');
+  assert.ok(sim, 'match still present');
+});

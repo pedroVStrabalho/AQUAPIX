@@ -114,7 +114,7 @@ test('a full-length counter, alone against the keeper, ends in a goal', () => {
   // to expire after 3.2, so a player alone three metres out was scored as a set
   // attack and could be saved or miss.
   let goals = 0, n = 0;
-  for (let t = 0; t < 20; t++) {
+  for (let t = 0; t < 40; t++) {
     const { sim, frame } = match(7300 + t);
     for (let i = 0; i < 2000 && !sim.isLive(); i++) frame();
     const me = sim.activeAthletes('home').find((a) => !a.isGoalkeeper);
@@ -128,9 +128,10 @@ test('a full-length counter, alone against the keeper, ends in a goal', () => {
     }
     me.pos.x = 0; me.pos.z = -gz * 0.55; me.vel.set(0, 0);
     sim._giveBall(me); sim._setPossession('home'); sim._openTransition('home');
-    let out = null, shot = false;
+    let out = null, shot = false, wasBreak = false;
     sim.bus.on('goal', () => { out ??= 'goal'; });
     sim.bus.on('save', () => { out ??= 'save'; });
+    sim.bus.on('shot', () => { wasBreak = !!sim.ball.breakaway; });
     const k = me.attackDir > 0 ? 'KeyD' : 'KeyA';
     for (let i = 0; i < 60 * 14 && !out; i++) {
       if (!shot) {
@@ -143,9 +144,13 @@ test('a full-length counter, alone against the keeper, ends in a goal', () => {
       frame();
     }
     fire('keyup', k);
+    // Count only shots that really were breakaways. A quick defender sometimes
+    // gets back level with you before the shot; that is a defended attack, and
+    // the rule rightly does not apply.
+    if (!wasBreak) { n--; continue; }
     if (out === 'goal') goals++;
   }
-  assert.ok(n >= 18, `the counters reached shooting range (${n})`);
+  assert.ok(n >= 12, `the counters reached shooting range still alone (${n})`);
   assert.ok(goals / n >= 0.9, `alone on the break inside 3m is a goal (${goals}/${n})`);
 });
 
@@ -412,7 +417,7 @@ test('a throw near a goal keeps its speed - the keeper can clear his own ball', 
     const orig = sim.ball.launch.bind(sim.ball);
     sim.ball.launch = (from, vel, spin, kind, by) => {
       const r = orig(from, vel, spin, kind, by);
-      watch = { v0: Math.hypot(vel.x, vel.z), frames: 0 };
+      watch = { v0: Math.hypot(vel.x, vel.z), frames: 0, kind };
       return r;
     };
     playAsHuman(sim, frame, 60 * 5, () => {
@@ -421,7 +426,13 @@ test('a throw near a goal keeps its speed - the keeper can clear his own ball', 
       if (watch.frames < 1) return;
       if (watch.v0 > 4) {
         launches++;
-        if (Math.hypot(sim.ball.vel.x, sim.ball.vel.z) < watch.v0 * 0.5) killed++;
+        // A whistle on the same frame (a foul) stops play and resets the ball:
+        // that is the referee, not the ball losing its speed.
+        if (sim.isLive() && Math.hypot(sim.ball.vel.x, sim.ball.vel.z) < watch.v0 * 0.5) {
+          killed++;
+          const b = sim.ball;
+          console.log(`   killed throw: ${watch.kind} ${watch.v0.toFixed(1)} -> ${Math.hypot(b.vel.x, b.vel.z).toFixed(1)} m/s at (${b.pos.x.toFixed(2)}, ${b.pos.y.toFixed(2)}, ${b.pos.z.toFixed(2)}) post=${b.eventFlags.post > 0} holder=${!!b.holder} state=${sim.state}`);
+        }
       }
       watch = null;
     });

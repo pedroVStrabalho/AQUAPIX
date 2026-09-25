@@ -99,6 +99,7 @@ class Game {
       // setup screen, but a config saved before that could still carry null.
       userSide: cfg.userSide === 'away' ? 'away' : 'home',
       onEnd: () => this.showFullTime('main'),
+      returnTo: 'main',
     });
   }
 
@@ -109,6 +110,7 @@ class Game {
       homeId: cfg.homeId ?? 'tidal', awayId: cfg.awayId ?? 'kraken',
       difficulty: 'club', assist: ASSIST_PROFILE.BEGINNER, refereeProfile: 'standard',
       userSide: 'home', drill, onEnd: () => this.showFullTime('training'),
+      returnTo: 'training',
     });
   }
 
@@ -120,6 +122,7 @@ class Game {
       difficulty: this.matchConfig.difficulty, assist: this.matchConfig.assist,
       refereeProfile: 'standard', userSide: userIsHome ? 'home' : 'away',
       careerTactics: this.careerTactics, careerSide: userIsHome ? 'home' : 'away',
+      returnTo: 'careerHub',
       onEnd: () => {
         this.career.completeRound({ home: this.sim.score.home, away: this.sim.score.away, simulated: false });
         this.saveCareer();
@@ -158,6 +161,7 @@ class Game {
       }
 
       this.onMatchEnd = opts.onEnd;
+      this.matchReturnTo = opts.returnTo ?? 'main';
       this.drill = opts.drill ?? null;
 
       this.renderer = new PixelRenderer(this.canvas, this.sim, { ...this.settings, splash: this.settings.splashDensity });
@@ -176,7 +180,7 @@ class Game {
       this.sim.start();
       this._applyDrill();
       loading.remove();
-      this.screens.toast('WASD move · X / SPACE shoot · Z pass · C lob · defending: X steal, Z block, SPACE foul', 4200);
+      this.screens.toast('WASD move · X / SPACE shoot · Z pass · C lob · defending: X steal, Z block, SPACE foul · Esc pause', 4200);
     }, 40));
   }
 
@@ -275,6 +279,7 @@ class Game {
       difficulty: this.matchConfig.difficulty, assist: this.matchConfig.assist,
       refereeProfile: 'standard', userSide: userIsHome ? 'home' : 'away',
       userPlayerId: 'ME',
+      returnTo: 'playerHub',
       onEnd: () => {
         const meAthlete = this.sim.squads[userIsHome ? 'home' : 'away'].find((a) => a.player.id === 'ME');
         const st = meAthlete ? { ...meAthlete.stats } : freshMe();
@@ -380,7 +385,10 @@ class Game {
       actions.appendChild(mk('Statistics', () => this._openStats()));
       actions.appendChild(mk('Abandon', () => {
         this._closeOverlay(); this.endMatch();
-        this.screens.show(this.player ? 'playerHub' : this.career ? 'careerHub' : 'main');
+        // Back to where THIS match was launched from. Guessing from which career
+        // objects happened to be loaded sent a Quick Match played after a Player
+        // Career session to the Player Career hub.
+        this.screens.show(this.matchReturnTo ?? 'main');
       }));
       panel.appendChild(actions);
 

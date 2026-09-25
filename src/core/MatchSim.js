@@ -92,6 +92,14 @@ export class MatchSim {
     this.bus = new EventBus();
     this.record = [];             // deterministic match record (section 41)
     this.difficultyKey = cfg.difficulty ?? 'national';
+    // Difficulty makes the OPPONENT better - their outfield AI and their keeper.
+    // It used to be applied to both teams, so at Legendary your own team-mates
+    // and your own keeper became legendary too and the setting cancelled itself
+    // out: measured over 120 matches, a player won as often on Amateur as on
+    // Legendary. Your side now plays at a fixed, competent level.
+    this.teammateDifficultyKey = 'national';
+    this.difficultyFor = (side) =>
+      (cfg.userSide && side === cfg.userSide) ? this.teammateDifficultyKey : this.difficultyKey;
     this.assistKey = cfg.assist ?? ASSIST_PROFILE.STANDARD;
     this.assist = ASSIST_VALUES[this.assistKey];
     this.refereeProfile = cfg.refereeProfile ?? 'standard';
@@ -121,8 +129,8 @@ export class MatchSim {
       away: makeTeamTactics(this.awayTeam.style),
     };
     this.ai = {
-      home: new TeamAI('home', this.tactics.home, this.difficultyKey, this.rng.fork(0xA1)),
-      away: new TeamAI('away', this.tactics.away, this.difficultyKey, this.rng.fork(0xA2)),
+      home: new TeamAI('home', this.tactics.home, this.difficultyFor('home'), this.rng.fork(0xA1)),
+      away: new TeamAI('away', this.tactics.away, this.difficultyFor('away'), this.rng.fork(0xA2)),
     };
 
     // --- Match state -------------------------------------------------------
@@ -185,7 +193,23 @@ export class MatchSim {
       const team = side === 'home' ? this.homeTeam : this.awayTeam;
       const roster = this.league.rosters[team.id];
       const dir = this.attackDir[side];
-      const squad = roster.map((p) => new Athlete(p, side, dir));
+      // The opponent plays to the chosen difficulty. The AI knobs alone (reaction,
+      // recognition, pressing) steer decisions but barely move results - AI v AI,
+      // Amateur and Legendary won 8 and 10 of 16 against National, with shots,
+      // passing, turnovers and steals flat - because outcomes are decided by the
+      // athletes' attributes. So difficulty also lifts or lowers every attribute
+      // of the side you face, for this match only, on a copy: the league's real
+      // players are never touched. Your own side is always at its real level.
+      const edge = (DIFFICULTY[this.difficultyFor(side)]?.edge) ?? 0;
+      // Discipline is left alone: lowering it made weak sides foul constantly,
+      // doubling the whistles on Amateur - choppiest exactly where the game
+      // should flow most easily.
+      const KEEP = new Set(['foulDiscipline', 'contactDiscipline', 'legalLeverage']);
+      const playAs = (p) => edge === 0 ? p : {
+        ...p,
+        attr: Object.fromEntries(Object.entries(p.attr).map(([k, v]) => [k, KEEP.has(k) ? v : clamp(v + edge, 1, 99)])),
+      };
+      const squad = roster.map((p) => new Athlete(playAs(p), side, dir));
       this.squads[side] = squad;
 
       const lineup = defaultLineup(roster);
@@ -938,7 +962,7 @@ export class MatchSim {
       brain.decayFake(dt);
       const userDriving = this.userGkControl && side === this.userControlsSide && this.userAthlete === gk;
       if (!userDriving) {
-        gk.cmd = brain.update(dt, { sim: this, difficulty: DIFFICULTY[this.difficultyKey] });
+        gk.cmd = brain.update(dt, { sim: this, difficulty: DIFFICULTY[this.difficultyFor(side)] });
       }
     }
   }
@@ -1732,7 +1756,7 @@ export class MatchSim {
       timing = clamp01(1 - Math.abs(shooter.chargeTime - ideal) / 0.55);
     } else {
       const skill = clamp01((shooter.player.attr.releaseSpeed * 0.5 + shooter.player.attr.composure * 0.5 - 10) / 85);
-      const diff = DIFFICULTY[this.difficultyKey] ?? DIFFICULTY.national;
+      const diff = DIFFICULTY[this.difficultyFor(shooter.side)] ?? DIFFICULTY.national;
       timing = clamp01(lerp(0.45, 0.95, skill) * lerp(0.82, 1.05, diff.recognition) +
         this.rng.gauss(0, diff.error * 0.5));
     }

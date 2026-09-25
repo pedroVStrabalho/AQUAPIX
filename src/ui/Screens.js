@@ -355,15 +355,13 @@ const SCREENS = {
     extra.style.marginTop = '16px';
     extra.appendChild(el('h3', null, 'Match commands'));
     const list = el('div', 'grid grid-3');
+    // Only commands that are actually wired up. This list used to advertise a
+    // camera on C (which is the lob pass), a tactics board, substitutions,
+    // pulling the keeper and an AI overlay - none of which any key triggered.
     const cmds = [
+      ['Esc / P', 'Pause - resume, statistics, quick settings, abandon'],
+      ['T', 'Call a timeout (your possession, two a match)'],
       ['G', 'Take or release manual goalkeeper control'],
-      ['C', 'Cycle camera'],
-      ['Tab', 'Tactics board'],
-      ['T', 'Request a timeout'],
-      ['R', 'Substitution screen'],
-      ['Y', 'Pull the goalkeeper for a seventh field player'],
-      ['Esc', 'Pause'],
-      ['F2', 'AI decision overlay'],
     ];
     for (const [k, d] of cmds) {
       const c = el('div');
