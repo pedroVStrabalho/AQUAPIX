@@ -924,7 +924,29 @@ export class MatchSim {
       this.setupPeriod();
       this._setState(MATCH_STATE.PERIOD_SETUP, 1.1);
       this._log('periodStart', { period: this.period });
+      this._bringOnScheduled();
     }
+  }
+
+  /**
+   * Player Career: a benched athlete comes on at the start of his period, for
+   * the most tired outfield player (his own position first). Period breaks are
+   * stoppages, so the change is always legal.
+   */
+  _bringOnScheduled() {
+    const e = this.scheduledEntry;
+    if (!e || this.period < e.period) return;
+    this.scheduledEntry = null;
+    const me = this.bench[e.side].find((a) => a.player.id === e.playerId);
+    if (!me) return;
+    const out = this.active[e.side]
+      .filter((a) => !a.isGoalkeeper)
+      .sort((a, b) => (b.player.position === me.player.position) - (a.player.position === me.player.position) || a.freshness - b.freshness)[0];
+    if (!out) return;
+    this._doSubstitution(e.side, out, me, false);
+    this.bus.emit('substitution', { side: e.side, out, in: me, reason: 'duringStoppage', by: 'coach' });
+    this.bus.emit('userEntry', { athlete: me, out });
+    this.setUserAthlete(me);
   }
 
   _endMatch() {

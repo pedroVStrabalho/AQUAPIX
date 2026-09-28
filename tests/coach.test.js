@@ -118,3 +118,34 @@ test('you can sell for a fee, but never below eleven players or your last keeper
   assert.equal(c.sellPlayer(lastField.id).reason, 'squadTooSmall');
   assert.equal(c.startingSeven().length, 7, 'the seven repairs itself after sales');
 });
+
+test('Player Career: earn your place - benched, then brought on in a later period', async () => {
+  const { PlayerCareer } = await import('../src/modes/PlayerCareer.js');
+  const league = generateLeague(424242);
+  const pc = new PlayerCareer(league, { clubId: 'tidal', name: 'Test Rookie', position: 'DR' }, 1);
+
+  // A raw rookie in a strong side starts on the bench...
+  const v = pc.managerVerdict();
+  assert.equal(v.starts, false, 'a 57-rated rookie does not walk into an 80s side');
+  assert.ok(v.entryPeriod >= 2 && v.entryPeriod <= 4, 'but he is told when he will come on');
+  // ...and form earns a start: the rule compares him with the man whose place
+  // he would take, not the best player in his position.
+  pc.me.overall = 80; pc.form = 1.2; pc.morale = 80; pc.energy = 95;
+  assert.equal(pc.managerVerdict().starts, true, 'a player in form wins his place');
+  pc.me.overall = 57; pc.form = 1.0; pc.morale = 70; pc.energy = 100;
+
+  // In the match: on the bench at kick-off, on at the start of his period.
+  const sim = new MatchSim({ profile: getProfile('arcade'), league, homeId: 'tidal', awayId: 'kraken', seed: 5,
+    difficulty: 'national', assist: ASSIST_PROFILE.STANDARD, refereeProfile: 'standard', userSide: 'home' });
+  const me = sim.squads.home.find((a) => a.player.id === 'ME');
+  assert.ok(!sim.active.home.includes(me), 'benched at kick-off');
+  sim.scheduledEntry = { side: 'home', playerId: 'ME', period: v.entryPeriod };
+  let cameOnIn = null;
+  sim.bus.on('userEntry', () => { cameOnIn = sim.period; });
+  sim.start();
+  for (let i = 0; i < 60 * 60 * 12 && sim.state !== MATCH_STATE.MATCH_END && cameOnIn == null; i++) sim.update(1 / 60);
+  assert.equal(cameOnIn, v.entryPeriod, `he came on at the start of period ${v.entryPeriod}`);
+  assert.ok(sim.active.home.includes(me), 'he is in the pool');
+  assert.equal(sim.userAthlete, me, 'and you are steering him');
+  assert.equal(sim.active.home.length, 7);
+});

@@ -158,8 +158,16 @@ class Game {
       // team-mate hold it, and were always steering the weakest player in the
       // pool. Your athlete still starts, you start the match on him, and his
       // goals, assists and rating still drive the career.
-      if (opts.userPlayerId) {
+      if (opts.userPlayerId && !opts.benched) {
         this._ensurePlayerStarts(opts.userSide, opts.userPlayerId);
+      } else if (opts.userPlayerId) {
+        // Earn your place: benched (or injured), your athlete starts on the
+        // bench. Benched, the coach brings him on at the start of a later
+        // period; injured, the team plays without him. You still steer the team.
+        this._ensurePlayerBenched(opts.userSide, opts.userPlayerId);
+        if (opts.entryPeriod) {
+          this.sim.scheduledEntry = { side: opts.userSide, playerId: opts.userPlayerId, period: opts.entryPeriod };
+        }
       }
 
       this.onMatchEnd = opts.onEnd;
@@ -174,9 +182,9 @@ class Game {
       this.sim.bus.on('matchEnd', () => setTimeout(() => this.onMatchEnd?.(), 1600));
 
       if (opts.userSide) {
-        const start = opts.userPlayerId
-          ? this.sim.squads[opts.userSide].find((a) => a.player.id === opts.userPlayerId)
-          : this.sim.autoSelectAthlete(opts.userSide);
+        const mine = opts.userPlayerId && !opts.benched
+          ? this.sim.squads[opts.userSide].find((a) => a.player.id === opts.userPlayerId) : null;
+        const start = mine ?? this.sim.autoSelectAthlete(opts.userSide);
         this.sim.setUserAthlete(start);
       }
       this.sim.start();
@@ -187,6 +195,20 @@ class Game {
   }
 
   /** Force the user's created player into the starting seven and control them. */
+  /** Make sure the user's athlete is NOT in the starting seven. */
+  _ensurePlayerBenched(side, playerId) {
+    const sim = this.sim;
+    const me = sim.active[side].find((a) => a.player.id === playerId);
+    if (!me) return;
+    const sub = sim.bench[side]
+      .filter((a) => !a.isGoalkeeper && a.player.id !== playerId)
+      .sort((a, b) => (b.player.position === me.player.position) - (a.player.position === me.player.position) || b.player.overall - a.player.overall)[0];
+    if (!sub) return;
+    const ai = sim.active[side].indexOf(me), bi = sim.bench[side].indexOf(sub);
+    sim.active[side][ai] = sub; sim.bench[side][bi] = me;
+    sub.inPool = true; me.inPool = false; sub.pos.set(me.pos.x, me.pos.z);
+  }
+
   _ensurePlayerStarts(side, playerId) {
     const sim = this.sim;
     const me = sim.squads[side].find((a) => a.player.id === playerId);
@@ -275,7 +297,9 @@ class Game {
     const fx = c.currentFixture();
     if (!fx) { this._afterPlayerWeek(null); return; }
     const userIsHome = fx.home === c.clubId;
+    const verdict = c.managerVerdict();
     this._launchMatch({
+      benched: !verdict.starts, entryPeriod: verdict.entryPeriod ?? null,
       league: this.playerLeague, profile: getProfile('arcade'),
       homeId: fx.home, awayId: fx.away,
       difficulty: this.matchConfig.difficulty, assist: this.matchConfig.assist,

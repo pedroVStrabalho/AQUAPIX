@@ -208,15 +208,31 @@ export class PlayerCareer {
   }
 
   // ---- Match integration -------------------------------------------------
-  /** Is the user selected to start? Manager picks by form & overall vs squad. */
+  /**
+   * Does the manager start you? You compete for the place of the WEAKEST player
+   * who would otherwise start in your position - not the best - and form,
+   * morale and energy can tip it. It used to compare you with the best player
+   * in your position and bench you unless you were within two points of him,
+   * so a rookie sat out for seasons. Benched, you still come on: sooner when
+   * your form is good.
+   */
   managerVerdict() {
-    const others = this.roster.filter((p) => p.id !== 'ME' && p.position === this.me.position);
-    const rivalBest = others.sort((a, b) => b.overall - a.overall)[0];
-    const myScore = this.me.overall + (this.form - 1) * 30 + this.morale * 0.05;
-    const rivalScore = rivalBest ? rivalBest.overall : 0;
     if (this.injuryWeeks > 0) return { starts: false, reason: 'injured' };
-    if (myScore >= rivalScore - 2) return { starts: true, reason: 'selected' };
-    return { starts: false, reason: 'benched' };
+    const others = this.roster.filter((p) => p.id !== 'ME' && p.position !== 'GK');
+    const samePos = others.filter((p) => p.position === this.me.position).sort((a, b) => b.overall - a.overall);
+    // The starters you are competing with: the top two in your position (a
+    // side fields two of most roles), or the weakest of the top six outfielders.
+    const top6 = [...others].sort((a, b) => b.overall - a.overall).slice(0, 6);
+    const rival = samePos.length ? samePos[Math.min(1, samePos.length - 1)] : top6[top6.length - 1];
+    const myScore = this.me.overall
+      + (this.form - 1) * 40                 // form 0.7..1.35 -> -12..+14
+      + (this.morale - 60) * 0.10            // morale 0..100  -> -6..+4
+      + (this.energy - 70) * 0.10;           // energy 0..100  -> -7..+3
+    const gap = (rival?.overall ?? 0) - myScore;
+    if (gap <= 3) return { starts: true, reason: 'selected' };
+    // On the bench: the better your form, the sooner the coach turns to you.
+    const entryPeriod = this.form >= 1.05 ? 2 : this.form >= 0.9 ? 3 : 4;
+    return { starts: false, reason: 'benched', entryPeriod, gap: Math.round(gap) };
   }
 
   /** Apply the result of a match you played. */

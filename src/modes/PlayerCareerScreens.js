@@ -183,7 +183,7 @@ registerScreen('playerHub', (game, params, mgr) => shell('Your Career', (body) =
       const vLine = el('div', 'mi-desc',
         verdict.starts ? 'The manager has named you in the starting seven.'
           : verdict.reason === 'injured' ? 'You are injured and cannot play this week.'
-            : 'You are on the bench — come on and prove the manager wrong.');
+            : `You start on the bench. The coach will bring you on at the start of period ${verdict.entryPeriod} - better form earns you a start.`);
       vLine.style.color = verdict.starts ? '#5ef08a' : verdict.reason === 'injured' ? '#ff5a5a' : '#ffcf4d';
       week.appendChild(vLine);
     } else {
