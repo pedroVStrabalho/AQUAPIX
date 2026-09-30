@@ -103,17 +103,6 @@ class Game {
     });
   }
 
-  startTraining(drill) {
-    const cfg = this.matchConfig;
-    this._launchMatch({
-      league: this.league, profile: getProfile('arcade'),
-      homeId: cfg.homeId ?? 'tidal', awayId: cfg.awayId ?? 'kraken',
-      difficulty: 'club', assist: ASSIST_PROFILE.BEGINNER, refereeProfile: 'standard',
-      userSide: 'home', drill, onEnd: () => this.showFullTime('training'),
-      returnTo: 'training',
-    });
-  }
-
   playCareerMatch(fixture) {
     const userIsHome = fixture.home === this.career.clubId;
     this._launchMatch({
@@ -172,7 +161,6 @@ class Game {
 
       this.onMatchEnd = opts.onEnd;
       this.matchReturnTo = opts.returnTo ?? 'main';
-      this.drill = opts.drill ?? null;
 
       this.renderer = new PixelRenderer(this.canvas, this.sim, { ...this.settings, splash: this.settings.splashDensity });
       this.canvas.style.opacity = '1';
@@ -188,7 +176,6 @@ class Game {
         this.sim.setUserAthlete(start);
       }
       this.sim.start();
-      this._applyDrill();
       loading.remove();
       this.screens.toast('WASD move · X / SPACE shoot · Z pass · C lob · defending: X steal, Z block, SPACE foul · R subs · Esc pause', 4200);
     }, 40));
@@ -229,17 +216,6 @@ class Game {
       me.pos.set(out.pos.x, out.pos.z);
     }
     sim.setUserAthlete(me);
-  }
-
-  _applyDrill() {
-    if (!this.drill || !this.sim) return;
-    const sim = this.sim;
-    if (this.drill === 'extraPlayer') {
-      const v = sim.activeAthletes('away').find((a) => !a.isGoalkeeper);
-      if (v) sim._excludeAthlete(v, 9999, false);
-    } else if (this.drill === 'counter') sim.transitionTimer = 3.2;
-    else if (this.drill === 'centre') { sim.tactics.home.offense = 'centreFirst'; sim.tactics.away.defense = 'centreFront'; }
-    else if (this.drill === 'shooting') { sim.tactics.home.offense = 'perimeter'; sim.tactics.away.defense = 'mDrop'; }
   }
 
   endMatch() {

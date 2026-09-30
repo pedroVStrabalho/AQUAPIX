@@ -943,3 +943,15 @@ body {
   border: 2px solid rgba(255, 255, 255, 0.35); border-right: 0;
   pointer-events: none;
 }
+
+/* ---- "In development" label on the two careers ---------------------------- */
+.pc-badge {
+  display: inline-block; align-self: flex-start; width: auto; margin-top: 12px; padding: 5px 9px;
+  font-family: var(--font-display); font-size: 9px; letter-spacing: 0.14em; text-transform: uppercase;
+  color: #fbbf24; border: 2px solid rgba(251, 191, 36, 0.55); background: rgba(251, 191, 36, 0.08);
+}
+.dev-notice {
+  margin-bottom: 14px; padding: 8px 12px;
+  font-size: 12px; line-height: 1.5; color: #fcd98a;
+  border: 2px solid rgba(251, 191, 36, 0.45); background: rgba(251, 191, 36, 0.07);
+}

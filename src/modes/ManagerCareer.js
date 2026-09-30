@@ -16,7 +16,7 @@ import { Rng, clamp, clamp01, lerp } from '../core/Math2.js';
 import { TEAMS, defaultLineup, distanceKm } from '../data/Teams.js';
 import { overallFor, POSITION_NAMES, TRAIT_BY_ID, OVERALL_WEIGHTS, POSITIONS } from '../data/Attributes.js';
 import { starRating, starString } from '../data/DisplayStats.js';
-import { registerScreen, shell, menuItem, chipRow, field, el, readableOnDark } from '../ui/Screens.js';
+import { registerScreen, shell, menuItem, chipRow, field, el, readableOnDark, devNotice } from '../ui/Screens.js';
 import { simulateByStars } from './SimResult.js';
 import { OFFENSIVE_SYSTEMS, DEFENSIVE_SYSTEMS, EXTRA_PLAYER_SYSTEMS, MAN_DOWN_SYSTEMS, TACTICAL_TRIGGERS } from '../ai/Tactics.js';
 import { humanise } from '../ui/HUD.js';
@@ -793,6 +793,7 @@ function confirmReplaceCareer(saved) {
 }
 
 registerScreen('careerSetup', (game, params, mgr) => shell('Coach Career', (body) => {
+  body.appendChild(devNotice());
   body.appendChild(el('p', null, 'Choose the club you will manage. Board expectations follow club prestige.'));
 
   const saved = game.loadCareerSave();
@@ -836,6 +837,7 @@ registerScreen('careerSetup', (game, params, mgr) => shell('Coach Career', (body
 }));
 
 registerScreen('careerHub', (game, params, mgr) => shell('Career', (body) => {
+  body.appendChild(devNotice());
   const c = game.career;
   const club = c.club;
 

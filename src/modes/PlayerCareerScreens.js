@@ -4,7 +4,7 @@
  * manager so they slot in beside the other modes.
  */
 
-import { registerScreen, shell, menuItem, chipRow, field, el } from '../ui/Screens.js';
+import { registerScreen, shell, menuItem, chipRow, field, el, devNotice } from '../ui/Screens.js';
 import { TEAMS } from '../data/Teams.js';
 import { POSITIONS, POSITION_NAMES } from '../data/Attributes.js';
 import { headlineRows, STAT_COLORS, starString, teamLevel } from '../data/DisplayStats.js';
@@ -24,6 +24,7 @@ function bar(label, value01, color, sub) {
 }
 
 registerScreen('playerCreate', (game, params, mgr) => shell('Create Your Player', (body) => {
+  body.appendChild(devNotice());
   const draft = game.playerDraft ?? (game.playerDraft = { name: '', position: 'DR', clubId: 'zephyr', leftHanded: false });
 
   const saved = game.loadPlayerSave();
@@ -102,6 +103,7 @@ registerScreen('playerCreate', (game, params, mgr) => shell('Create Your Player'
 }));
 
 registerScreen('playerHub', (game, params, mgr) => shell('Your Career', (body) => {
+  body.appendChild(devNotice());
   const c = game.player;
   const club = c.club;
   const me = c.me;

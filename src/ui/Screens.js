@@ -113,6 +113,7 @@ function playCard(opts) {
   if (opts.kicker) b.appendChild(el('div', 'pc-kicker', opts.kicker));
   b.appendChild(el('div', 'pc-title', opts.title));
   if (opts.desc) b.appendChild(el('div', 'pc-desc', opts.desc));
+  if (opts.badge) b.appendChild(el('span', 'pc-badge', opts.badge));
   b.addEventListener('click', opts.onClick);
   return b;
 }
@@ -122,6 +123,12 @@ function utilLink(label, onClick) {
   const b = el('button', 'util-link', label);
   b.addEventListener('click', onClick);
   return b;
+}
+
+/** "Playable, but still being improved" - shown on the two careers. */
+export function devNotice() {
+  return el('div', 'dev-notice',
+    'IN DEVELOPMENT - fully playable, and still being improved. Some things may change or feel unfinished.');
 }
 
 function chipRow(options, value, onPick) {
@@ -151,7 +158,7 @@ const SCREENS = {
     grid.appendChild(playCard({
       title: 'Quick Match', kicker: 'Jump in', glyph: '\u{1F93D}',
       accent: '#7dd3fc', wash: 'linear-gradient(135deg, #0c3b52, #072433)',
-      desc: 'Pick two clubs and a rules profile, then play.',
+      desc: 'Pick two clubs and a match length, then play.',
       onClick: () => mgr.show('matchSetup'),
     }));
 
@@ -159,6 +166,7 @@ const SCREENS = {
       title: 'Player Career', kicker: 'Be the athlete', glyph: '\u{1F3C5}',
       accent: '#fbbf24', wash: 'linear-gradient(135deg, #4a3410, #221806)',
       desc: 'You ARE a player: train, earn, live your life, then play the matches.',
+      badge: 'In development',
       onClick: () => mgr.show('playerCreate'),
     }));
 
@@ -167,15 +175,8 @@ const SCREENS = {
       accent: '#4ade80', wash: 'linear-gradient(135deg, #0d3f2a, #051c13)',
       className: 'is-wide',
       desc: 'Sign players, run an academy, work the market and the money, and win a league.',
+      badge: 'In development',
       onClick: () => mgr.show('careerSetup'),
-    }));
-
-    grid.appendChild(playCard({
-      title: 'Training Arena', kicker: 'Practice', glyph: '\u{1F3AF}',
-      accent: '#c084fc', wash: 'linear-gradient(135deg, #331b4d, #180d24)',
-      className: 'is-wide is-compact',
-      desc: 'Isolated drills: shooting, passing under pressure, extra-player attack.',
-      onClick: () => mgr.show('training'),
     }));
 
     body.appendChild(grid);
@@ -581,29 +582,6 @@ const SCREENS = {
     body.appendChild(a);
   }),
 
-  // ------------------------------------------------------------- training ---
-  training: (game, params, mgr) => shell('Training Arena', (body) => {
-    body.appendChild(el('p', null,
-      'Isolated drills that run on the full match simulation - the same physics, the same officiating, the same AI.'));
-    const list = el('div', 'menu-list');
-    const drills = [
-      ['freePlay', 'Free Play', 'Full seven-on-seven with the clock stopped. Learn the water.'],
-      ['shooting', 'Shooting Drill', 'Repeated possessions against a live goalkeeper from six metres.'],
-      ['extraPlayer', 'Extra-Player Attack', 'Six-on-five with the possession clock at eighteen seconds.'],
-      ['centre', 'Centre Battle', 'Two-on-two around the centre forward. Learn leverage and exclusions.'],
-      ['counter', 'Counterattack', 'Turnover into transition, repeatedly.'],
-    ];
-    for (const [id, title, desc] of drills) {
-      list.appendChild(menuItem(title, desc, null, () => game.startTraining(id)));
-    }
-    body.appendChild(list);
-
-    const a = el('div', 'actions');
-    const back = el('button', 'btn ghost', 'Back');
-    back.addEventListener('click', () => mgr.show('main'));
-    a.appendChild(back);
-    body.appendChild(a);
-  }),
 
   // --------------------------------------------------------------- status ---
   status: (game, params, mgr) => shell('Implementation Status', (body) => {
