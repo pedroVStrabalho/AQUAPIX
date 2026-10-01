@@ -149,3 +149,31 @@ test('Player Career: earn your place - benched, then brought on in a later perio
   assert.equal(sim.userAthlete, me, 'and you are steering him');
   assert.equal(sim.active.home.length, 7);
 });
+
+test('Player Career: you control your own player and nobody else', async () => {
+  const league = generateLeague(424242);
+  const sim = new MatchSim({ profile: getProfile('arcade'), league, homeId: 'tidal', awayId: 'kraken', seed: 11,
+    difficulty: 'national', assist: ASSIST_PROFILE.STANDARD, refereeProfile: 'standard', userSide: 'home' });
+  sim.lockUserAthlete = true;
+  const me = sim.active.home.find((a) => !a.isGoalkeeper);
+  sim.setUserAthlete(me);
+  let changed = 0, calls = 0, received = 0, had = false;
+  sim.bus.on('userAthleteChanged', () => changed++);
+  sim.start();
+  for (let i = 0; i < 60 * 60 * 8 && sim.state !== MATCH_STATE.MATCH_END; i++) {
+    // Every switch a player could press, and the automatic one, must do nothing.
+    if (i % 90 === 0) { sim.switchAthlete('home', 1); sim.toggleGoalkeeperControl(); }
+    const h = sim.ball.holder;
+    if (sim.isLive() && h && h.side === 'home' && h !== me && !h.isGoalkeeper && !(me.callingForBall > 0) && me.inPool) {
+      me.callingForBall = 1.2; calls++;
+    }
+    sim.update(1 / 60);
+    if (me.hasBall && !had) received++;
+    had = me.hasBall;
+    if (me.hasBall && sim.isLive()) sim.tryPass(me, sim.active.home.find((a) => a !== me && !a.isGoalkeeper), 'dry', 0.6);
+    assert.equal(sim.userAthlete, me, 'control never leaves your player');
+  }
+  assert.equal(changed, 0, 'no switch, manual or automatic');
+  assert.ok(calls > 5, `you called for the ball (${calls})`);
+  assert.ok(received >= 5, `and your team-mates gave it to you (${received} times)`);
+});

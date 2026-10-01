@@ -140,19 +140,17 @@ class Game {
         this.sim.ai[opts.careerSide].tactics = this.sim.tactics[opts.careerSide];
       }
 
-      // Player career: make sure YOUR athlete is in the starting seven. The match
-      // itself plays exactly like Quick Match - whole team, auto-switching, the
-      // same shootout. Locked to one athlete you had the ball 5% of the time
-      // (against 26% in Quick Match), spent 29% of every match watching a
-      // team-mate hold it, and were always steering the weakest player in the
-      // pool. Your athlete still starts, you start the match on him, and his
-      // goals, assists and rating still drive the career.
+      // Player career: you are ONE athlete. Control is locked to him for the
+      // whole match - no switching, no steering team-mates. The match rules and
+      // physics are the same as Quick Match; only who you control differs.
+      // Off the ball, Z calls for it and the carrier looks for you.
+      if (opts.userPlayerId) this.sim.lockUserAthlete = true;
       if (opts.userPlayerId && !opts.benched) {
         this._ensurePlayerStarts(opts.userSide, opts.userPlayerId);
       } else if (opts.userPlayerId) {
         // Earn your place: benched (or injured), your athlete starts on the
         // bench. Benched, the coach brings him on at the start of a later
-        // period; injured, the team plays without him. You still steer the team.
+        // period, and until then you watch from the bench.
         this._ensurePlayerBenched(opts.userSide, opts.userPlayerId);
         if (opts.entryPeriod) {
           this.sim.scheduledEntry = { side: opts.userSide, playerId: opts.userPlayerId, period: opts.entryPeriod };
@@ -170,14 +168,19 @@ class Game {
       this.sim.bus.on('matchEnd', () => setTimeout(() => this.onMatchEnd?.(), 1600));
 
       if (opts.userSide) {
-        const mine = opts.userPlayerId && !opts.benched
+        // Player Career: always your own athlete, even while he is on the bench.
+        const mine = opts.userPlayerId
           ? this.sim.squads[opts.userSide].find((a) => a.player.id === opts.userPlayerId) : null;
         const start = mine ?? this.sim.autoSelectAthlete(opts.userSide);
         this.sim.setUserAthlete(start);
       }
       this.sim.start();
       loading.remove();
-      this.screens.toast('WASD move · X / SPACE shoot · Z pass · C lob · defending: X steal, Z block, SPACE foul · R subs · Esc pause', 4200);
+      this.screens.toast(opts.userPlayerId
+        ? (opts.benched
+          ? `You start on the bench - you come on in period ${opts.entryPeriod}. You control only your own player.`
+          : 'You control only your own player · WASD move · X / SPACE shoot · Z pass, or call for the ball · C lob · Esc pause')
+        : 'WASD move · X / SPACE shoot · Z pass · C lob · defending: X steal, Z block, SPACE foul · R subs · Esc pause', 4800);
     }, 40));
   }
 

@@ -2096,6 +2096,9 @@ export class MatchSim {
   }
 
   requestSubstitution(side, out, incoming, by = 'user') {
+    // Player Career: your own athlete stays in the pool once he is on - being
+    // hauled off by the AI coach would leave you with nobody to control.
+    if (this.lockUserAthlete && out === this.userAthlete) return { ok: false, reason: 'userAthlete' };
     const legal = substitutionLegal(this.profile, {
       state: this.state,
       enteringAt: out.pos,
@@ -2141,7 +2144,7 @@ export class MatchSim {
     if (out.isGoalkeeper && incoming.isGoalkeeper) {
       this.gkBrain[side] = new GoalkeeperBrain(incoming, side, this.rng.fork(side === 'home' ? 17 : 19));
     }
-    if (this.userAthlete === out) this.userAthlete = incoming;
+    if (this.userAthlete === out && !this.lockUserAthlete) this.userAthlete = incoming;
     this.roleDirty = true;
     this.stats[side].substitutions++;
     this._log('substitution', { side, out: out.id, in: incoming.id, forced });
@@ -2311,6 +2314,7 @@ export class MatchSim {
   }
 
   toggleGoalkeeperControl() {
+    if (this.lockUserAthlete) return;
     const side = this.userControlsSide;
     if (this.userGkControl) {
       this.setUserAthlete(this.autoSelectAthlete(side));

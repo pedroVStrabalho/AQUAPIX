@@ -304,7 +304,7 @@ export class TeamAI {
       const field = mine.filter((p) => p.inPool && !p.isGoalkeeper);
       // On your side the sprinter is the athlete YOU are steering - otherwise an
       // AI team-mate raced for the same ball beside you.
-      const yours = sim.userControlsSide === this.side && sim.userAthlete && field.includes(sim.userAthlete)
+      const yours = sim.userControlsSide === this.side && !sim.lockUserAthlete && sim.userAthlete && field.includes(sim.userAthlete)
         ? sim.userAthlete : null;
       if (yours) this._sprinter = yours;
       else if (!this._sprinter || !field.includes(this._sprinter)) {
@@ -335,6 +335,7 @@ export class TeamAI {
     }
 
     for (const p of mine) {
+      if (p.callingForBall > 0) p.callingForBall = Math.max(0, p.callingForBall - dt);
       if (!p.inPool) continue;
       // Skip the athlete a real human is driving. Never skip in AI-vs-AI
       // (no controlling side), or the carrier would freeze and never act.
@@ -767,6 +768,20 @@ export class TeamAI {
     const matured = clamp01((this._possT ?? 0) / 14);
     const shotBar = lerp(0.40, 0.14, matured) * lerp(1.12, 0.88, this.plan.riskTolerance);
     const willShoot = choice.kind === 'shoot' && (choice.quality > shotBar || desperate || putBack);
+
+    // A team-mate you are not steering has the ball and YOU are calling for it
+    // (Player Career): he gives it to you unless he has a real shot on.
+    const me = sim.userControlsSide === this.side ? sim.userAthlete : null;
+    const called = me && me !== p && me.inPool && !me.isGoalkeeper && me.callingForBall > 0 &&
+      !(willShoot && (choice.quality > 0.34 || desperate || putBack));
+    if (called && !p.actionLock && settled) {
+      const d = dist2(p.pos, me.pos);
+      if (d > 1.5 && d < 16) {
+        me.callingForBall = 0;
+        sim.tryPass(p, me, d > 9 ? PASS_TYPES.LOB : PASS_TYPES.DRY, clamp01(0.5 + d / 22));
+        return cmd;
+      }
+    }
 
     if (mayAct && !p.actionLock && settled) {
       if (willShoot) {
